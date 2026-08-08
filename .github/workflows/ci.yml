@@ -12,7 +12,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: ['22.6', '24']
+        # Running the .ts sources needs type stripping on by default:
+        # measured, that is Node 22.18+ (22.13 has node:sqlite but not stripping).
+        node: ['22.18', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,12 +30,20 @@ jobs:
   # that failure mode is visible.
   packaged:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.13 is exactly what package.json claims as the floor — the published
+        # package is compiled .js, so it only needs node:sqlite, not stripping.
+        # If this job passes on 22.13, the engines field is honest.
+        node: ['22.13', '24']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: '24' }
+        with: { node-version: '${{ matrix.node }}' }
       - run: npm ci --ignore-scripts
       - run: npm run build
+        # build needs stripping-capable Node for tsc? no — tsc is JS. fine on 22.13.
       - run: npm pack
       - name: install the tarball somewhere clean and use it
         run: |

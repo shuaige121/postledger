@@ -43,7 +43,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.6.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "test": "node tests/invariants.mjs && node tests/money.mjs && node tests/engine.mjs && node tests/forensics.mjs && node tests/reports.mjs && node tests/e2e.mjs",

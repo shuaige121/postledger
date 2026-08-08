@@ -12,7 +12,7 @@ and no DELETE path at all; a mistake is corrected with a reversing entry. Money 
 so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
-**14 MCP tools. 304 tests. Zero dependencies.** Runs on Node 22.6+, needs no server, no daemon, and no
+**14 MCP tools. 304 tests. Zero dependencies.** Runs on Node 22.13+, needs no server, no daemon, and no
 account.
 
 ```bash
@@ -320,7 +320,7 @@ is trying to be good at.
 
 ## Install
 
-Requires **Node 22.6+** (native TypeScript and `node:sqlite`).
+Requires **Node 22.13+** — that is where `node:sqlite` became available without a flag (measured, not guessed). Contributors running the TypeScript sources directly need 22.18+, where type stripping is on by default.
 
 ```bash
 npx postledger --help          # no install
