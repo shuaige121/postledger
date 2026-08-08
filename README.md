@@ -12,8 +12,14 @@ and no DELETE path at all; a mistake is corrected with a reversing entry. Money 
 so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
-**14 MCP tools. 304 tests. Zero dependencies.** Runs on Node 22.13+, needs no server, no daemon, and no
-account.
+Three surfaces over the same file: a **Unix CLI**, an **MCP server** (14 tools), and a **local read-only
+web view** in your browser. 304 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+no daemon, and no account.
+
+There is no hosted version and there will not be one. This project is *structurally incapable* of holding
+your data — a book is a SQLite file on your disk — and therefore structurally incapable of leaking it,
+selling it, or walking away with it. That is not a promise about our intentions; it is a property of
+where the file lives.
 
 ```bash
 npx postledger --help

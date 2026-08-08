@@ -59,13 +59,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/postledger.git"
+    "url": "git+https://github.com/shuaige121/postledger.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/postledger/issues"
+    "url": "https://github.com/shuaige121/postledger/issues"
   },
-  "homepage": "https://github.com/OWNER/postledger#readme",
-  "mcpName": "dev.postledger/postledger",
+  "homepage": "https://github.com/shuaige121/postledger#readme",
+  "mcpName": "io.github.shuaige121/postledger",
   "devDependencies": {
     "@types/node": "^26.2.0",
     "typescript": "^7.0.2"
