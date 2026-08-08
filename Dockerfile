@@ -23,8 +23,9 @@ ENV POSTLEDGER_BOOK=/books/ledger.db
 
 # Prove the image works at build time: a full ledger lifecycle in one layer.
 # If any invariant is broken this build fails rather than shipping a bad image.
-RUN node tests/invariants.mjs && node tests/money.mjs && node tests/engine.mjs \
- && node tests/forensics.mjs && node tests/e2e.mjs
+# Use the same entry point CI and contributors use. A hand-written list here
+# would silently drift from package.json — it already had, missing reports.mjs.
+RUN npm test
 
 ENTRYPOINT ["postledger"]
 CMD ["--help"]

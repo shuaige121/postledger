@@ -13,7 +13,7 @@ so there is no float anywhere and no rounding tolerance to exploit. `postledger 
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
 Three surfaces over the same file: a **Unix CLI**, an **MCP server** (14 tools), and a **local read-only
-web view** in your browser. 304 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+web view** in your browser. 315 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
 no daemon, and no account.
 
 There is no hosted version and there will not be one. This project is *structurally incapable* of holding
@@ -106,7 +106,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 304 of them across six
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 315 of them across six
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -402,7 +402,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-304 assertions across six suites: schema invariants, money arithmetic, the engine, forensics, reports
+315 assertions across six suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License

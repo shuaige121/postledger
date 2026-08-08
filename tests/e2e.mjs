@@ -224,7 +224,20 @@ console.log('\n\x1b[1mG. Web view (read-only, localhost-bound)\x1b[0m');
   const port = 7801;
   const srv = spawn('node', [CLI, 'serve', '--book', BOOK, '--port', String(port)],
                     { env, stdio: ['ignore', 'pipe', 'pipe'] });
-  await new Promise((r) => setTimeout(r, 1800));
+
+  // Poll until it answers rather than sleeping a fixed amount. A constant is
+  // a guess about how fast the machine is, and it was wrong the first time it
+  // met an emulated arm64 runner: 1.8s is plenty here and not nearly enough
+  // under QEMU. Polling costs nothing when startup is fast.
+  const ready = await (async () => {
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try { await fetch(`http://127.0.0.1:${port}/api/summary`); return true; }
+      catch { await new Promise((r) => setTimeout(r, 200)); }
+    }
+    return false;
+  })();
+  eq('G0 the server came up', ready, true);
   const get = async (path) => {
     const res = await fetch(`http://127.0.0.1:${port}${path}`);
     return {
