@@ -387,6 +387,15 @@ book.post({
 postledger verify || echo "the books need attention"
 ```
 
+## Deeper reading
+
+- **[Idempotency](docs/idempotency.md)** — the retry that posts twice, and the four ways an
+  "idempotency" claim turns out to mean nothing
+- **[Append-only accounting](docs/append-only.md)** — why there is no UPDATE and no DELETE, and how
+  inverting the write order makes SQLite's lack of deferred constraints stop mattering
+- **[Threat model](docs/threat-model.md)** — what the chain proves, what it cannot, and what would
+  have to change for that list to shrink
+
 ## Tests
 
 ```bash
