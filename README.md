@@ -22,7 +22,7 @@ selling it, or walking away with it. That is not a promise about our intentions;
 where the file lives.
 
 ```bash
-docker run ghcr.io/shuaige121/postledger --help
+npx postledger --help
 ```
 
 ---
@@ -342,6 +342,11 @@ is trying to be good at.
 
 Requires **Node 22.13+** — that is where `node:sqlite` became available without a flag (measured, not guessed). Contributors running the TypeScript sources directly need 22.18+, where type stripping is on by default.
 
+```bash
+npx postledger --help          # no install
+npm install -g postledger      # or install it
+```
+
 **Docker** — nothing to install, and the image runs the full test suite at build time, so an image that
 exists is an image whose invariants held. Built for amd64 and arm64:
 
@@ -358,7 +363,7 @@ npm test                       # 315 assertions
 node src/cli.ts --help
 ```
 
-**npm** — not published yet. When it is, `npx postledger` will be the shortest path.
+
 
 A book is one SQLite file, so the entire deployment story is that one `-v`. No database service, no
 migrations to run, nothing to back up except a directory.
