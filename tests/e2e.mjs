@@ -291,6 +291,15 @@ console.log('\n\x1b[1mH. Single-file HTML audit report\x1b[0m');
   has('H10 and lists the valid ones', bad.stderr, 'journal|html|json');
 }
 
+console.log('\n\x1b[1mI0. --version reports the real version\x1b[0m');
+{
+  const { readFileSync } = await import('node:fs');
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const out = cli('--version').stdout.trim();
+  eq('I0a --version prints a version, not the help text', out.includes('USAGE'), false);
+  eq('I0b and it matches package.json', out, pkg.version);
+}
+
 console.log('\n\x1b[1mI. Newly exposed capabilities\x1b[0m');
 {
   const alloc = j(cli('allocate', '100.00', '1', '1', '1'));

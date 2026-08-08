@@ -11,6 +11,18 @@
 
 import { Ledger, PostledgerError } from './ledger.ts';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+
+// Read the version from package.json rather than keeping a copy here. A
+// hand-maintained constant had already drifted — it still said 0.1.0 after
+// 0.1.1 shipped, so `--version` lied to anyone who asked.
+const VERSION: string = (() => {
+  try {
+    return (createRequire(import.meta.url)('../package.json') as { version: string }).version;
+  } catch {
+    return 'unknown';
+  }
+})();
 
 // Exit codes are part of the interface — scripts will depend on them
 const EXIT = {
@@ -189,8 +201,10 @@ async function main() {
   const a = parseArgs(argv);
   const cmd = a._[0];
 
+  // --version must be checked before the help fallback: it arrives as a flag,
+  // so `cmd` is undefined and `!cmd` would swallow it and print help instead.
+  if (a.flags.version || a.flags.v) { console.log(VERSION); return EXIT.OK; }
   if (!cmd || a.flags.help || cmd === 'help') { console.log(HELP); return EXIT.OK; }
-  if (a.flags.version) { console.log('postledger 0.1.0'); return EXIT.OK; }
 
   // Every command other than init and mcp needs the book open
   if (cmd === 'init') {
