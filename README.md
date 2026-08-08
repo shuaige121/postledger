@@ -217,6 +217,20 @@ rounding tolerance to hide behind — money is integer minor units, so a differe
 difference and means something is wrong. Profit for the period is shown as its own line inside equity
 rather than folded in silently, so retained earnings and this period's result stay distinguishable.
 
+## A report you can send to your accountant
+
+```bash
+postledger export --format html > audit-report.html
+```
+
+One self-contained file. It opens from `file://`, makes **no network request at all** (verified in CI by
+intercepting every request), and carries the chain head plus the integrity result in a banner at the top
+— so whoever receives it can run `postledger verify` against the original book and compare hashes.
+
+It reuses the exact page `postledger serve` renders, so there is no second reporting engine to drift out
+of sync with the first. A report nobody can check is decoration; this one states what it is (a
+point-in-time snapshot, not a live view) and how to check it.
+
 ## Your data is not held hostage
 
 ```bash
@@ -337,9 +351,12 @@ Or Docker — the image runs the full test suite at build time, so an image that
 invariants held:
 
 ```bash
-docker run -v "$PWD/books:/books" postledger \
+docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
   init /books/demo.db --name "Acme Co" --currency USD
 ```
+
+A book is one SQLite file, so the entire deployment story is that one `-v`. No database service, no
+migrations to run, nothing to back up except a directory.
 
 As a library:
 

@@ -101,7 +101,7 @@ export async function runServer(bookPath: string, opts: { port?: number; host?: 
 // The page. One file, no build, no network.
 // ---------------------------------------------------------------------------
 
-const PAGE = `<!doctype html>
+export const PAGE = `<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -167,10 +167,14 @@ const PAGE = `<!doctype html>
 <nav id="nav"></nav>
 <main id="view"><div class="card">Loading…</div></main>
 <footer>
-  Read-only view. Writes go through the CLI or MCP — this page cannot modify the books.
+  <span id="foot">Read-only view. Writes go through the CLI or MCP — this page cannot modify the books.</span>
 </footer>
 <script>
-const F = async (p) => (await fetch(p)).json();
+// One page, two modes. Served live it fetches; exported as a single file it
+// reads data inlined at export time — so the exported report opens from
+// file:// and makes no network request at all.
+const SNAPSHOT = globalThis.__POSTLEDGER_SNAPSHOT__ || null;
+const F = async (p) => SNAPSHOT ? SNAPSHOT[p.split('?')[0]] : (await fetch(p)).json();
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const money = (v) => {
   const neg = String(v).startsWith('-');
@@ -320,6 +324,11 @@ async function render(tab) {
   document.querySelectorAll('nav button').forEach(b =>
     b.addEventListener('click', () => render(b.textContent)));
   const s = await F('/api/summary');
+  if (SNAPSHOT) {
+    document.getElementById('foot').textContent =
+      'Static snapshot exported ' + (SNAPSHOT.__exported_at__ || '') +
+      ' — a point-in-time copy, not a live view of the book.';
+  }
   document.getElementById('book').textContent = s.book + ' · ' + s.currency;
   document.getElementById('chain').textContent =
     s.chain_head ? 'chain ' + s.chain_head.slice(0, 12) + '… #' + s.chain_length : 'empty book';

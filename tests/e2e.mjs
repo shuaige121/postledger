@@ -259,6 +259,25 @@ console.log('\n\x1b[1mG. Web view (read-only, localhost-bound)\x1b[0m');
   }
 }
 
+console.log('\n\x1b[1mH. Single-file HTML audit report\x1b[0m');
+{
+  const html = cli('export', '--format', 'html').stdout;
+  eq('H1 report is produced', html.length > 5000, true);
+  has('H2 it is a complete document', html, '<!doctype html>');
+  has('H3 data is inlined, not fetched', html, '__POSTLEDGER_SNAPSHOT__');
+  has('H4 the chain head is stated up front', html, 'Chain head');
+  has('H5 it says it is a snapshot, not a live view', html, 'static snapshot, not a live view');
+  has('H6 and tells the reader how to check it', html, 'postledger verify');
+
+  // The whole point of a single file: it must not reach the network.
+  eq('H7 no external stylesheets or scripts', /(?:src|href)="https?:/.test(html), false);
+  eq('H8 no fetch() to a remote origin', /fetch\(['"`]https?:/.test(html), false);
+
+  const bad = cli('export', '--format', 'nope');
+  eq('H9 unknown format is refused', bad.code, 1);
+  has('H10 and lists the valid ones', bad.stderr, 'journal|html|json');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(`\n\x1b[1mResult: ${pass} passed, ${fail} failed\x1b[0m\n`);
 process.exit(fail === 0 ? 0 : 1);

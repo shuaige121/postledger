@@ -151,7 +151,8 @@ READING
   by-actor <actor>                            what one actor wrote
 
 INTEROP
-  export [--format journal|json] [--no-tags]  hledger/ledger journal on stdout
+  export [--format journal|html|json]          journal for hledger, or a
+              [--no-tags] [--as-of <d>]         single-file HTML audit report
   import <file> [--dry-run] [--actor <who>]   import a hledger/ledger journal
 
 INTEGRITY
@@ -288,10 +289,15 @@ async function main() {
           // Journal goes to stdout raw, not wrapped in JSON — so it can be
           // piped straight into hledger.
           process.stdout.write(L.exportJournal({ includeTags: !a.flags['no-tags'] }));
+        } else if (fmt === 'html') {
+          // A single self-contained file: opens from file://, no network, and
+          // carries the chain head so the reader can check it against the book.
+          const { buildReport } = await import('./report.ts');
+          process.stdout.write(buildReport(L, { asOf: a.flags['as-of'] as string }));
         } else if (fmt === 'json') {
           emit(L.entries({ limit: 500 }), a);
         } else {
-          console.error(`postledger: unknown export format ${JSON.stringify(fmt)} (journal|json)`);
+          console.error(`postledger: unknown export format ${JSON.stringify(fmt)} (journal|html|json)`);
           return EXIT.ERROR;
         }
         break;
