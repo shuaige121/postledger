@@ -17,7 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Money, currencyOf, type Currency } from './money.ts';
 import { benford, roundNumbers, duplicateAmounts, thresholdClustering, outliers, timingPattern } from './audit.ts';
-import { balanceSheet, incomeStatement, type BalanceRow } from './reports.ts';
+import { balanceSheet, incomeStatement, ageing, type BalanceRow } from './reports.ts';
 import { toJournal, fromJournal, type ExportEntry } from './interop.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -265,10 +265,18 @@ export class Ledger {
       throw err('ACCOUNT_EXISTS', `account ${id} already exists`,
         'Use the existing account; opening is a one-time action.');
     }
+    // Default the overdraft policy by account type rather than blanket-denying.
+    // A cash or bank account going negative is almost always an error worth
+    // stopping. Income, expense, liability and equity accounts legitimately
+    // swing negative — a refund larger than the period's spend, a reversal
+    // landing before the entry it corrects. Denying those by default would
+    // block correct bookkeeping in the name of a guardrail, which is the trap
+    // the reference implementation fell into.
+    const allowNegative = opts.allowNegative ?? (type !== 'asset');
     try {
       this.db.prepare(
         'INSERT INTO accounts (id,type,allow_negative,opened_at,note) VALUES (?,?,?,?,?)',
-      ).run(id, type, opts.allowNegative ? 1 : 0, nowIso().slice(0, 10), opts.note ?? null);
+      ).run(id, type, allowNegative ? 1 : 0, nowIso().slice(0, 10), opts.note ?? null);
     } catch (e: any) {
       if (/Colon:Separated/.test(e.message)) {
         throw err('BAD_ACCOUNT_NAME', e.message.replace(/^.*postledger: /, ''),
@@ -276,7 +284,7 @@ export class Ledger {
       }
       throw e;
     }
-    return { ok: true as const, account: id, type };
+    return { ok: true as const, account: id, type, allow_negative: allowNegative };
   }
 
   accounts(): Array<{ id: string; type: string; balance: string }> {
@@ -565,6 +573,12 @@ export class Ledger {
       this.db.exec('COMMIT');
     } catch (e: any) {
       this.db.exec('ROLLBACK');
+      if (/below zero/.test(e.message)) {
+        throw err('WOULD_GO_NEGATIVE', e.message.replace(/^.*postledger: /, ''),
+          'That account is marked as not allowing a negative balance — a cash or bank account ' +
+          'going negative is usually a missing entry rather than an overdraft. Check the balance ' +
+          'first, or open the account with allow_negative if it genuinely may go below zero.');
+      }
       if (/lock date/.test(e.message)) {
         throw err('PERIOD_LOCKED', e.message.replace(/^.*postledger: /, ''),
           'This accounting period is closed. Post to an open period, or move the lock date deliberately.');
@@ -918,14 +932,35 @@ export class Ledger {
                accounts_referenced: [...new Set(parsed.flatMap((t) => t.legs.map((l) => l.account)))].sort(),
                note: `Would post ${parsed.length} entries. Re-run without --dry-run to apply.` };
     }
-    const results = parsed.map((t, i) => this.post({
-      idempotencyKey: `import:${opts.source}:${i + 1}:${t.date}`,
-      date: t.date,
-      description: t.description,
-      legs: t.legs.map((l) => ({ account: l.account, side: l.side, amount: l.amount })),
-      expectedTotal: t.expectedTotal,
-      actor: opts.actor ?? `import:${opts.source}`,
-    }));
+    // Derive the idempotency key from the transaction's CONTENT, not its line
+    // number. A key containing the row index breaks the moment the file is
+    // re-sorted or a line is inserted above — every key shifts, nothing is
+    // recognised as a replay, and the whole file posts a second time. That is
+    // a hole in the one property this project is built on.
+    //
+    // Two genuinely distinct transactions can be identical (two 12.00 coffees
+    // on the same day), so identical fingerprints are disambiguated by their
+    // occurrence within the file. Re-importing the same file reproduces the
+    // same fingerprints in the same order, so the count matches and every
+    // entry is recognised as a replay.
+    const seen = new Map<string, number>();
+    const results = parsed.map((t) => {
+      const fingerprint = sha256(canonical({
+        date: t.date,
+        description: t.description,
+        legs: t.legs.map((l) => `${l.account}|${l.side}|${l.amount}`).sort(),
+      })).slice(0, 16);
+      const nth = (seen.get(fingerprint) ?? 0) + 1;
+      seen.set(fingerprint, nth);
+      return this.post({
+        idempotencyKey: `import:${opts.source}:${fingerprint}${nth > 1 ? `#${nth}` : ''}`,
+        date: t.date,
+        description: t.description,
+        legs: t.legs.map((l) => ({ account: l.account, side: l.side, amount: l.amount })),
+        expectedTotal: t.expectedTotal,
+        actor: opts.actor ?? `import:${opts.source}`,
+      });
+    });
     return {
       ok: true as const, dry_run: false,
       imported: results.filter((r) => !r.replayed).length,
@@ -1117,6 +1152,61 @@ export class Ledger {
           `and only to the extent the anchor log itself lives somewhere they do not control.`,
     };
   }
+
+  /**
+   * Ageing for one account: how old is the money sitting there.
+   *
+   * Reversed entries are excluded — a reversed receivable is cancelled, not
+   * overdue, and showing it in the 90+ bucket would be actively misleading.
+   */
+  ageing(account: string, opts: { asOf?: string } = {}) {
+    if (!this.db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(account)) {
+      throw err('UNKNOWN_ACCOUNT', `account ${JSON.stringify(account)} does not exist`,
+        'Use postledger_chart to see the available accounts.',
+        { did_you_mean: this.suggestAccounts(account) });
+    }
+    const asOf = opts.asOf ?? nowIso().slice(0, 10);
+    const acct = this.db.prepare('SELECT type FROM accounts WHERE id = ?').get(account) as any;
+    const normalDebit = acct.type === 'asset' || acct.type === 'expense';
+
+    const rows = this.db.prepare(
+      `SELECT e.id, e.date, e.description, p.side, p.amount
+       FROM postings p JOIN entries e ON e.id = p.entry_id
+       WHERE p.account_id = ?
+         AND NOT EXISTS (SELECT 1 FROM reversals r WHERE r.reversed_entry_id  = e.id)
+         AND NOT EXISTS (SELECT 1 FROM reversals r WHERE r.reversing_entry_id = e.id)
+         AND e.date <= ?
+       ORDER BY e.date`).all(account, asOf) as any[];
+
+    const items = rows.map((r) => {
+      const increases = (normalDebit && r.side === 'debit') || (!normalDebit && r.side === 'credit');
+      return { ref: r.id, date: r.date, counterparty: r.description,
+               amount: increases ? BigInt(r.amount) : -BigInt(r.amount) };
+    }).filter((i) => i.amount !== 0n);
+
+    return { account, ...ageing(items, this.currency, asOf) };
+  }
+
+  /**
+   * Split an amount by ratios without losing a minor unit.
+   *
+   * Exposed as a tool because division is exactly the arithmetic a language
+   * model gets wrong, and it gets it wrong quietly: three "thirds" of 100 that
+   * sum to 99.99 look right until they reach a ledger that refuses to balance.
+   */
+  allocate(amount: string, ratios: number[]) {
+    const m = Money.fromJson(amount, this.currency);
+    const parts = m.allocate(ratios);
+    return {
+      ok: true as const,
+      amount: m.format(), ratios,
+      parts: parts.map((p) => p.format()),
+      sum: parts.reduce((s, p) => s.add(p), Money.zero(this.currency)).format(),
+      currency: this.currency.code,
+      note: 'The parts sum exactly to the original amount. Use these figures verbatim; do not round them.',
+    };
+  }
+
 
   /** The chain head, for external anchoring. An anchor only means something once it has left this machine. */
   anchor() {

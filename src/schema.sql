@@ -171,6 +171,34 @@ BEGIN
     WHERE p.entry_id = NEW.id AND a.closed_at IS NOT NULL
   );
 
+  -- Overdraft policy. An account marked allow_negative = 0 must not be driven
+  -- below zero by this entry.
+  --
+  -- This is enforced here rather than in application code for the usual
+  -- reason: the policy is a property of the account, and it has to hold for
+  -- every writer that will ever touch this file. The balance is computed over
+  -- sealed entries plus the one being sealed right now — the postings of NEW
+  -- are already present but its header is not, which is exactly the moment
+  -- the whole picture is knowable.
+  SELECT RAISE(ABORT, 'postledger: entry would drive an account below zero, and that account does not allow a negative balance')
+  WHERE EXISTS (
+    SELECT 1
+    FROM (SELECT DISTINCT account_id FROM postings WHERE entry_id = NEW.id) t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE a.allow_negative = 0
+      AND (
+        SELECT COALESCE(SUM(
+          CASE WHEN a.type IN ('asset','expense')
+               THEN CASE WHEN p.side = 'debit'  THEN p.amount ELSE -p.amount END
+               ELSE CASE WHEN p.side = 'credit' THEN p.amount ELSE -p.amount END
+          END), 0)
+        FROM postings p
+        WHERE p.account_id = t.account_id
+          AND (p.entry_id = NEW.id
+               OR EXISTS (SELECT 1 FROM entries e WHERE e.id = p.entry_id))
+      ) < 0
+  );
+
   -- Lock date: stops an agent from backdating an entry into an already-closed period
   SELECT RAISE(ABORT, 'postledger: date is on or before the lock date')
   WHERE NEW.date <= COALESCE((SELECT value FROM meta WHERE key = 'lock_date'), '');

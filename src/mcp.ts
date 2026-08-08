@@ -131,6 +131,42 @@ const TOOLS = [
     readOnly: true,
   },
   {
+    name: 'postledger_ageing',
+    description:
+      'How old is the money in one account, bucketed (current, 1-30, 31-60, 61-90, 90+). ' +
+      'Reversed entries are excluded — a reversed receivable is cancelled, not overdue. ' +
+      'Use for receivables and payables ageing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string' },
+        as_of: { type: 'string', description: 'YYYY-MM-DD; omit for today' },
+      },
+      required: ['account'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_allocate',
+    description:
+      'Split an amount by integer ratios so the parts sum EXACTLY to the original — no cent lost, ' +
+      'no cent invented (largest-remainder method). Use this instead of doing the division yourself: ' +
+      'three "thirds" of 100.00 computed by hand come to 99.99 or 100.01, and the ledger will reject ' +
+      'the resulting entry. A participant with ratio 0 receives exactly 0.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'string', description: AMOUNT_DESC },
+        ratios: { type: 'array', items: { type: 'integer', minimum: 0 }, minItems: 1,
+                  description: 'Non-negative integers, e.g. [1,1,1] for an even three-way split' },
+      },
+      required: ['amount', 'ratios'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
     name: 'postledger_actors',
     description:
       'Who has written to this book, with entry counts. NOTE: actor is self-declared, not authenticated — ' +
@@ -151,8 +187,11 @@ const TOOLS = [
       properties: {
         account: { type: 'string', description: 'Colon:Separated:Path, no spaces' },
         type: { type: 'string', enum: ['asset', 'liability', 'equity', 'income', 'expense'] },
-        allow_negative: { type: 'boolean', default: false,
-          description: 'Whether this account may go negative. A cash drawer should not; a customer-credit liability may.' },
+        allow_negative: { type: 'boolean',
+          description: 'Whether this account may hold a negative balance. Omit to take the sensible ' +
+            'default for the type: asset accounts may NOT go negative (a bank account below zero is ' +
+            'almost always a missing entry, not an overdraft), every other type may. This is enforced ' +
+            'by the database at post time, not merely recorded.' },
         note: { type: 'string' },
       },
       required: ['account', 'type'],
@@ -278,6 +317,8 @@ const HANDLERS: Record<string, Handler> = {
   postledger_verify: (L) => L.verify(),
   postledger_audit: (L, a) => L.auditSignals(a ?? {}),
   postledger_actors: (L) => L.actors(),
+  postledger_ageing: (L, a) => L.ageing(a.account, { asOf: a.as_of }),
+  postledger_allocate: (L, a) => L.allocate(a.amount, a.ratios),
 
   postledger_open_account: (L, a) =>
     L.openAccount(a.account, a.type, { allowNegative: a.allow_negative, note: a.note }),

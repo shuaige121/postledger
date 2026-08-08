@@ -12,8 +12,8 @@ and no DELETE path at all; a mistake is corrected with a reversing entry. Money 
 so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
-Three surfaces over the same file: a **Unix CLI**, an **MCP server** (14 tools), and a **local read-only
-web view** in your browser. 315 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+Three surfaces over the same file: a **Unix CLI**, an **MCP server** (16 tools), and a **local read-only
+web view** in your browser. 336 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
 no daemon, and no account.
 
 There is no hosted version and there will not be one. This project is *structurally incapable* of holding
@@ -106,7 +106,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 315 of them across six
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 336 of them across six
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -359,7 +359,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 315 assertions
+npm test                       # 336 assertions
 node src/cli.ts --help
 ```
 
@@ -412,7 +412,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-315 assertions across six suites: schema invariants, money arithmetic, the engine, forensics, reports
+336 assertions across six suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License

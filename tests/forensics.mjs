@@ -22,8 +22,12 @@ const bookPath = join(dir, 'book.db');
 function freshBook() {
   for (const s of ['', '-wal', '-shm']) rmSync(bookPath + s, { force: true });
   const L = Ledger.create(bookPath, { name: 'Forensics Co', currency: 'SGD' });
-  L.openAccount('Assets:Bank', 'asset');
-  L.openAccount('Assets:Cash', 'asset');
+  // These suites exercise statistical signals, not the overdraft guard, and
+  // they post payments out of accounts they never fund. Opting into a negative
+  // balance keeps the fixture focused instead of padding every case with a
+  // funding entry.
+  L.openAccount('Assets:Bank', 'asset', { allowNegative: true });
+  L.openAccount('Assets:Cash', 'asset', { allowNegative: true });
   L.openAccount('Income:Sales', 'income');
   L.openAccount('Expenses:Misc', 'expense');
   return L;

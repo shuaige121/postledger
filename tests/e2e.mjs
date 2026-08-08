@@ -291,6 +291,20 @@ console.log('\n\x1b[1mH. Single-file HTML audit report\x1b[0m');
   has('H10 and lists the valid ones', bad.stderr, 'journal|html|json');
 }
 
+console.log('\n\x1b[1mI. Newly exposed capabilities\x1b[0m');
+{
+  const alloc = j(cli('allocate', '100.00', '1', '1', '1'));
+  eq('I1 allocate splits three ways', alloc.parts.join('/'), '33.34/33.33/33.33');
+  eq('I2 and the parts sum exactly', alloc.sum, '100.00');
+  const zero = j(cli('allocate', '100.00', '0', '1', '2'));
+  eq('I3 a zero ratio gets nothing', zero.parts[0], '0.00');
+
+  const age = j(cli('ageing', 'Assets:Bank:Checking'));
+  eq('I4 ageing returns buckets', Array.isArray(age.buckets), true);
+  eq('I5 with the standard five', age.buckets.map((b) => b.bucket).join(','),
+     'current,1-30,31-60,61-90,90+');
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(`\n\x1b[1mResult: ${pass} passed, ${fail} failed\x1b[0m\n`);
 process.exit(fail === 0 ? 0 : 1);

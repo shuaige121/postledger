@@ -235,6 +235,67 @@ console.log('\n\x1b[1mH. Truncation attack detection\x1b[0m');
   L2.close();
 }
 
+console.log('\n\x1b[1mJ. Overdraft policy (allow_negative is enforced, not merely stored)\x1b[0m');
+{
+  const L = freshBook();
+  eq('J1 asset defaults to NOT allowing negative',
+     L.openAccount('Assets:Cash2', 'asset').allow_negative, false);
+  eq('J2 expense defaults to allowing negative',
+     L.openAccount('Expenses:Refundable', 'expense').allow_negative, true);
+  eq('J3 an explicit opt-in is honoured',
+     L.openAccount('Assets:CreditLine', 'asset', { allowNegative: true }).allow_negative, true);
+
+  rejects('J4 paying out of an empty cash account', 'WOULD_GO_NEGATIVE', () => L.post({
+    idempotencyKey: 'neg-1', date: '2026-08-08', description: 'overspend',
+    legs: [{ account: 'Expenses:Refundable', side: 'debit', amount: '50.00' },
+           { account: 'Assets:Cash2', side: 'credit', amount: '50.00' }],
+    expectedTotal: '50.00' }));
+
+  L.post({ idempotencyKey: 'fund', date: '2026-08-08', description: 'funding',
+    legs: [{ account: 'Assets:Cash2', side: 'debit', amount: '100.00' },
+           { account: 'Income:Sales', side: 'credit', amount: '100.00' }],
+    expectedTotal: '100.00' });
+  eq('J5 once funded, the same payment goes through', L.post({
+    idempotencyKey: 'neg-2', date: '2026-08-08', description: 'now affordable',
+    legs: [{ account: 'Expenses:Refundable', side: 'debit', amount: '50.00' },
+           { account: 'Assets:Cash2', side: 'credit', amount: '50.00' }],
+    expectedTotal: '50.00' }).ok, true);
+
+  eq('J6 an opted-in account may go below zero', L.post({
+    idempotencyKey: 'neg-3', date: '2026-08-08', description: 'on the credit line',
+    legs: [{ account: 'Expenses:Refundable', side: 'debit', amount: '75.00' },
+           { account: 'Assets:CreditLine', side: 'credit', amount: '75.00' }],
+    expectedTotal: '75.00' }).ok, true);
+  eq('J7 and it really is negative', L.balance('Assets:CreditLine').balance, '-75.00');
+  L.close();
+}
+
+console.log('\n\x1b[1mK. Import keys survive the file being reordered\x1b[0m');
+{
+  const L = freshBook();
+  L.openAccount('Assets:Bank2', 'asset', { allowNegative: true });
+  L.openAccount('Expenses:Misc2', 'expense');
+  const TX = [
+    '2026-08-01 Coffee\n    Expenses:Misc2    12.00 SGD\n    Assets:Bank2     -12.00 SGD\n',
+    '2026-08-02 Lunch\n    Expenses:Misc2    30.00 SGD\n    Assets:Bank2     -30.00 SGD\n',
+    '2026-08-01 Coffee\n    Expenses:Misc2    12.00 SGD\n    Assets:Bank2     -12.00 SGD\n',
+  ];
+  const j = (order) => order.map((i) => TX[i]).join('\n');
+
+  const first = L.importJournal(j([0, 1, 2]), { source: 'bank.journal' });
+  eq('K1 three transactions imported', first.imported, 3);
+  eq('K2 including both identical coffees', L.info().entries, 3);
+
+  // Same content, lines reordered. A key derived from the line number would
+  // match nothing here and post everything a second time.
+  const again = L.importJournal(j([2, 0, 1]), { source: 'bank.journal' });
+  eq('K3 re-importing reordered content adds nothing', again.imported, 0);
+  eq('K4 all three recognised as already present', again.already_present, 3);
+  eq('K5 the book still holds three entries', L.info().entries, 3);
+  L.close();
+}
+
+
 console.log('\n\x1b[1mI. Period locking\x1b[0m');
 {
   const L = freshBook();

@@ -186,14 +186,23 @@ export class Money {
     let remainder = this.minor - shares.reduce((a, b) => a + b, 0n);
 
     // Hand out the remainder one minor unit at a time; for a negative
-    // amount the remainder is negative, so step by -1
+    // amount the remainder is negative, so step by -1.
+    //
+    // Only participants with a non-zero ratio are eligible. Rotating over
+    // every index hands a cent to someone entitled to nothing:
+    // allocate([0, 1, 2]) of 1.00 would return 0.01/0.33/0.66 instead of
+    // 0.00/0.33/0.67. A zero share must stay zero — someone with no
+    // entitlement receiving money is not a rounding detail, it is a wrong
+    // number with a name attached to it.
+    const eligible = ratios.reduce<number[]>((acc, r, i) => (r > 0 ? (acc.push(i), acc) : acc), []);
     const step = remainder < 0n ? -1n : 1n;
     const out = [...shares];
-    let i = 0;
+    let k = 0;
     while (remainder !== 0n) {
+      const i = eligible[k % eligible.length]!;
       out[i] = out[i]! + step;
       remainder -= step;
-      i = (i + 1) % out.length;
+      k++;
     }
     return out.map((minor) => new Money(minor, this.currency));
   }

@@ -148,6 +148,8 @@ READING
   income-statement [--from <d>] [--to <d>]    income - expenses for a period
   entries [--account <a>] [--since <d>] [--limit <n>]
   actors                                      who has written to this book
+  ageing <account> [--as-of <d>]              how old is the money in one account
+  allocate <amount> <ratio> [ratio...]        split an amount, losing no cent
   by-actor <actor>                            what one actor wrote
 
 INTEROP
@@ -319,6 +321,10 @@ async function main() {
           account: a.flags.account as string, since: a.flags.since as string }), a);
         break;
       case 'actors':        emit(L.actors(), a); break;
+      case 'ageing':        emit(L.ageing(a._[1]!, { asOf: a.flags['as-of'] as string }), a); break;
+      case 'allocate':
+        emit(L.allocate(a._[1]!, a._.slice(2).map(Number)), a);
+        break;
       case 'by-actor':      emit(L.entriesByActor(a._[1]!), a); break;
 
       case 'verify': {

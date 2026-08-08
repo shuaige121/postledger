@@ -69,6 +69,19 @@ console.log('\n\x1b[1mE. Allocation loses not a single cent (largest-remainder m
   eq('E5 and the total is still 0.01',
      one.reduce((s, m) => s.add(m), Money.zero(SGD)).format(), '0.01');
 
+  // Regression: the remainder used to rotate over every index, so a
+  // participant with ratio 0 received a cent they were not entitled to.
+  const withZero = hundred.allocate([0, 1, 2]);
+  eq('E6a a zero ratio receives exactly zero', withZero[0].format(), '0.00');
+  // The odd cent goes to the first entitled party (deterministic), never to
+  // the one with ratio 0.
+  eq('E6b and the odd cent goes to an entitled party',
+     withZero.map((m) => m.format()).join('/'), '0.00/33.34/66.66');
+  eq('E6c the parts still sum to the original',
+     withZero.reduce((s, m) => s.add(m), Money.zero(SGD)).format(), '100.00');
+  const manyZeros = Money.parse('0.05', SGD).allocate([0, 0, 1]);
+  eq('E6d several zeros stay zero', manyZeros.map((m) => m.format()).join('/'), '0.00/0.00/0.05');
+
   const negative = Money.parse('-100.00', SGD).allocate([1, 1, 1]);
   eq('E6 negative amounts allocate without losing anything either',
      negative.reduce((s, m) => s.add(m), Money.zero(SGD)).format(), '-100.00');
