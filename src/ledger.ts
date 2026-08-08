@@ -20,6 +20,7 @@ import { benford, roundNumbers, duplicateAmounts, thresholdClustering, outliers,
 import { balanceSheet, incomeStatement, ageing, type BalanceRow } from './reports.ts';
 import { toJournal, fromJournal, type ExportEntry } from './interop.ts';
 import { migrate, CURRENT_SCHEMA_VERSION } from './migrations.ts';
+import { readStatement, type CsvProfile } from './bankimport.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -449,7 +450,7 @@ export class Ledger {
 
   // -- Posting ----------------------------------------------------------------
 
-  post(input: PostInput) {
+  post(input: PostInput, opts: { dryRun?: boolean } = {}) {
     const key = (input.idempotencyKey ?? '').trim();
     if (!key) {
       throw err('MISSING_IDEMPOTENCY_KEY', 'idempotency_key is required',
@@ -480,6 +481,27 @@ export class Ledger {
     // operations that have already started producing side effects, not for
     // typos.
     const validated = this.validate(input);
+
+    // A dry run performs the real write — every trigger, every constraint —
+    // and then rolls it back. Simulating the checks instead would mean a second
+    // implementation of them, and the second implementation is the one that
+    // drifts. It also never touches the idempotency table, so previewing does
+    // not consume the key the real call will need.
+    if (opts.dryRun) {
+      this.db.exec('SAVEPOINT preview');
+      try {
+        const result = this.write(input, validated);
+        return {
+          ...result, dry_run: true, replayed: false,
+          ids_are_preview_only: true,
+          note: 'Nothing was written. The entry_id and chain_head above belong to a rolled-back ' +
+                'transaction — do not reuse them. Re-send without dry_run to commit.',
+        };
+      } finally {
+        this.db.exec('ROLLBACK TO preview');
+        this.db.exec('RELEASE preview');
+      }
+    }
 
     const requestHash = sha256(canonical({ op: 'post', input }));
     const replay = this.claim(key, 'post', requestHash);
@@ -656,7 +678,10 @@ export class Ledger {
     });
     const hash = sha256((prevHash ?? '') + payload);
 
-    this.db.exec('BEGIN IMMEDIATE');
+    // Already inside a savepoint (a dry run) means a transaction is open, and
+    // SQLite has no nested BEGIN.
+    const inTx = this.db.isTransaction === true;
+    if (!inTx) this.db.exec('BEGIN IMMEDIATE');
     try {
       const insLeg = this.db.prepare(
         `INSERT INTO postings (entry_id,seq,account_id,side,amount,memo,tax_code,tax_amount,fx_currency,fx_amount)
@@ -674,18 +699,19 @@ export class Ledger {
       this.db.prepare('INSERT INTO chain_head (seq,hash,recorded_at) VALUES (?,?,?)')
         .run(BigInt(seq), hash, createdAt);
 
-      this.db.exec('COMMIT');
+      if (!inTx) this.db.exec('COMMIT');
     } catch (e: any) {
-      this.db.exec('ROLLBACK');
+      if (!inTx) this.db.exec('ROLLBACK');
       if (/below zero/.test(e.message)) {
         throw err('WOULD_GO_NEGATIVE', e.message.replace(/^.*postledger: /, ''),
           'That account is marked as not allowing a negative balance — a cash or bank account ' +
           'going negative is usually a missing entry rather than an overdraft. Check the balance ' +
           'first, or open the account with allow_negative if it genuinely may go below zero.');
       }
-      if (/lock date/.test(e.message)) {
+      if (/lock date|closed period/.test(e.message)) {
         throw err('PERIOD_LOCKED', e.message.replace(/^.*postledger: /, ''),
-          'This accounting period is closed. Post to an open period, or move the lock date deliberately.');
+          'That period has been closed. Post to an open period, or reopen the closed one deliberately — ' +
+          'reopening is recorded, which is the point.');
       }
       throw err('WRITE_REJECTED', e.message.replace(/^.*postledger: /, ''),
         'The database refused this entry. This is the last line of defence — the message says which invariant failed.');
@@ -1715,20 +1741,115 @@ export class Ledger {
     return { ok: true as const, sha256: sha, count: rows.length, entries: rows };
   }
 
-  /** Lock the book: no new entries accepted on or before this date */
-  lock(date: string) {
-    if (!ISO_DATE.test(date)) {
-      throw err('BAD_DATE', `lock date ${JSON.stringify(date)} is not YYYY-MM-DD`, 'Use an ISO date like "2026-07-31".');
-    }
-    const current = (this.db.prepare("SELECT value FROM meta WHERE key='lock_date'").get() as any)?.value;
-    if (current && date < current) {
-      throw err('LOCK_DATE_REGRESSION', `cannot move the lock date backwards (currently ${current})`,
-        'Locks only move forward. Reopening a closed period is a deliberate act — edit meta by hand and record why.');
-    }
-    this.db.prepare("INSERT INTO meta (key,value) VALUES ('lock_date',?) ON CONFLICT(key) DO UPDATE SET value=?")
-      .run(date, date);
-    return { ok: true as const, lock_date: date };
+  /**
+   * Read a bank statement into candidate transactions. Nothing is posted.
+   *
+   * A statement line says money moved; it does not say which account faces it.
+   * That call belongs to whoever is reading it — and in this system that is
+   * usually a model, which does it better than a rules table. So the ledger
+   * parses and fingerprints, and hands the judgement back.
+   */
+  readStatement(csv: string, profile: CsvProfile) {
+    const r = readStatement(csv, profile, this.currency, sha256);
+    // Flag candidates whose fingerprint was already used, so the caller can
+    // see at a glance what is new rather than posting everything and relying
+    // on replays to sort it out.
+    const known = this.db.prepare(
+      "SELECT 1 FROM idempotency WHERE key = ? UNION SELECT 1 FROM entries WHERE idempotency_key = ?");
+    return {
+      ...r,
+      candidates: r.candidates.map((c) => ({
+        ...c,
+        suggested_key: `stmt:${c.fingerprint}`,
+        already_posted: !!known.get(`stmt:${c.fingerprint}`, `stmt:${c.fingerprint}`),
+      })),
+    };
   }
+
+
+  /**
+   * Close a period: nothing dated on or before `asOf` can be posted any more.
+   *
+   * A close is an event, not a setting. It carries a name you can refer to,
+   * it can be listed, and reopening it is recorded rather than being a silent
+   * rewind of a number. In a ledger where every correction is visible, closing
+   * the books should not be the one operation that leaves no trace.
+   */
+  closePeriod(name: string, asOf: string, opts: { actor?: string; note?: string } = {}) {
+    if (!ISO_DATE.test(asOf)) {
+      throw err('BAD_DATE', `as_of ${JSON.stringify(asOf)} is not YYYY-MM-DD`, 'Use an ISO date like "2026-03-31".');
+    }
+    if (!name?.trim()) {
+      throw err('MISSING_NAME', 'a period close needs a name',
+        'Name it the way you would refer to it out loud: "FY2026 Q1", "March 2026".');
+    }
+    const open = this.db.prepare(
+      'SELECT name, as_of FROM period_closes WHERE reopened_at IS NULL AND as_of >= ? ORDER BY as_of DESC LIMIT 1',
+    ).get(asOf) as any;
+    if (open) {
+      throw err('ALREADY_CLOSED',
+        `${asOf} is already covered by "${open.name}" (closed through ${open.as_of})`,
+        'Closes only move forward. To change an earlier one, reopen it first — which is recorded.');
+    }
+    const conflicting = this.db.prepare(
+      'SELECT COUNT(*) c FROM entries WHERE date <= ?').get(asOf) as any;
+    this.db.prepare(
+      'INSERT INTO period_closes (name,as_of,closed_at,closed_by,note) VALUES (?,?,?,?,?)',
+    ).run(name.trim(), asOf, nowIso(), opts.actor ?? null, opts.note ?? null);
+    return {
+      ok: true as const, name: name.trim(), as_of: asOf,
+      entries_covered: Number(conflicting.c),
+      note: 'Nothing dated on or before this can be posted now. Reopening is possible and will be recorded.',
+    };
+  }
+
+  /** Reopen a closed period. Recorded, and only possible once per close. */
+  reopenPeriod(seq: number, reason: string, opts: { actor?: string } = {}) {
+    const row = this.db.prepare('SELECT * FROM period_closes WHERE seq = ?').get(BigInt(seq)) as any;
+    if (!row) throw err('PERIOD_NOT_FOUND', `no period close #${seq}`, 'List them with `postledger periods`.');
+    if (row.reopened_at) {
+      throw err('ALREADY_REOPENED', `period close #${seq} ("${row.name}") was already reopened on ${row.reopened_at}`,
+        'A close can be reopened once. Close the period again if you need it locked, then reopen that.');
+    }
+    if (!reason?.trim()) {
+      throw err('MISSING_REASON', 'reopening a period requires a reason',
+        'This goes into the permanent record. Say what needs to change and why it could not wait.');
+    }
+    this.db.prepare(
+      'UPDATE period_closes SET reopened_at=?, reopened_by=?, reopen_reason=? WHERE seq=?',
+    ).run(nowIso(), opts.actor ?? null, reason.trim(), BigInt(seq));
+    return { ok: true as const, seq, name: row.name, as_of: row.as_of, reason: reason.trim(),
+             note: 'The period is open again, and this reopening is now part of the record.' };
+  }
+
+  /** Every close ever made, including reopened ones. */
+  periods() {
+    const rows = this.db.prepare('SELECT * FROM period_closes ORDER BY as_of DESC').all() as any[];
+    const openThrough = this.db.prepare(
+      'SELECT MAX(as_of) m FROM period_closes WHERE reopened_at IS NULL').get() as any;
+    return {
+      ok: true as const,
+      closed_through: openThrough?.m ?? null,
+      count: rows.length,
+      periods: rows.map((r) => ({
+        seq: Number(r.seq), name: r.name, as_of: r.as_of,
+        closed_at: r.closed_at, closed_by: r.closed_by, note: r.note,
+        reopened: !!r.reopened_at,
+        ...(r.reopened_at ? { reopened_at: r.reopened_at, reopened_by: r.reopened_by,
+                              reopen_reason: r.reopen_reason } : {}),
+      })),
+    };
+  }
+
+  /**
+   * Kept for compatibility: the old scalar lock, expressed as a close.
+   * Prefer closePeriod, which lets you name it and reopen it deliberately.
+   */
+  lock(date: string) {
+    const r = this.closePeriod(`locked through ${date}`, date, { note: 'created via the legacy lock command' });
+    return { ok: true as const, lock_date: date, closed_as: r.name };
+  }
+
 
   info() {
     const meta = this.readMeta();

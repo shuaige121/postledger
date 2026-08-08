@@ -139,7 +139,10 @@ USAGE
 BOOK
   init <file> --name <name> --currency SGD    create a book (one file = one book)
   info                                        book summary + chain head
-  lock <YYYY-MM-DD>                           close the period up to this date
+  close <YYYY-MM-DD> [--name <n>] [--note <t>] close a period; nothing on/before it
+  close reopen <seq> --reason <text>           reopen a close (recorded)
+  periods                                      every close, including reopened
+  lock <YYYY-MM-DD>                            legacy alias for close
 
 ACCOUNTS
   account open <Path:Like:This> --type asset|liability|equity|income|expense
@@ -148,7 +151,7 @@ ACCOUNTS
 POSTING
   post --key <k> --date <d> --desc <text> \\
        --leg "Acct debit 100.00" --leg "Acct credit 100.00" --expect-total 100.00
-       [--actor <who>] [--expect-balance "Acct 500.00"]
+       [--actor <who>] [--expect-balance "Acct 500.00"] [--dry-run]
   reverse <entry-id> --key <k> --reason <text>
   revert-actor <actor> --key <k> --reason <text> [--since <d>] [--dry-run]
 
@@ -170,6 +173,9 @@ INTEROP
   export [--format journal|html|json]          journal for hledger, or a
               [--no-tags] [--as-of <d>]         single-file HTML audit report
   import <file> [--dry-run] [--actor <who>]   import a hledger/ledger journal
+  read-statement <file.csv> [--date <col>]    parse a bank CSV into candidates
+       [--amount <col> | --debit <col> --credit <col>] [--desc <col>] [--ref <col>]
+       [--date-format dmy|mdy|ymd] [--invert-sign] [--no-header]
 
 INTEGRITY
   assert <account> <amount> [--subtree]       confirm a balance against reality
@@ -266,7 +272,7 @@ async function main() {
           expectedTotal: String(a.flags['expect-total'] ?? ''),
           actor: a.flags.actor ? String(a.flags.actor) : undefined,
           expectBalanceAfter: expectBalance,
-        }), a);
+        }, { dryRun: !!a.flags['dry-run'] }), a);
         break;
       }
 
@@ -351,6 +357,32 @@ async function main() {
         }), a);
         break;
       case 'actors':        emit(L.actors(), a); break;
+      case 'close': {
+        if (a._[1] === 'reopen') {
+          emit(L.reopenPeriod(Number(a._[2]), String(a.flags.reason ?? ''), { actor: a.flags.actor as string }), a);
+        } else {
+          emit(L.closePeriod(String(a.flags.name ?? `closed through ${a._[1]}`), a._[1]!,
+            { actor: a.flags.actor as string, note: a.flags.note as string }), a);
+        }
+        break;
+      }
+      case 'periods':       emit(L.periods(), a); break;
+      case 'read-statement': {
+        const file = a._[1];
+        if (!file) { console.error('postledger: read-statement needs a CSV file'); return EXIT.ERROR; }
+        emit(L.readStatement(readFileSync(file, 'utf8'), {
+          date: a.flags.date as string ?? 'date',
+          amount: a.flags.amount as string,
+          debit: a.flags.debit as string, credit: a.flags.credit as string,
+          description: a.flags.desc as string ?? 'description',
+          reference: a.flags.ref as string,
+          dateFormat: a.flags['date-format'] as any,
+          invertSign: !!a.flags['invert-sign'],
+          delimiter: a.flags.delimiter as string,
+          hasHeader: !a.flags['no-header'],
+        }), a);
+        break;
+      }
       case 'assert': {
         if (a.flags.generate) {
           emit(L.generateAssertions({ actor: a.flags.actor as string, note: a.flags.note as string }), a);

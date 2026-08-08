@@ -12,8 +12,8 @@ and no DELETE path at all; a mistake is corrected with a reversing entry. Money 
 so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
-Three surfaces over the same file: a **Unix CLI**, an **MCP server** (19 tools), and a **local read-only
-web view** in your browser. 396 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+Three surfaces over the same file: a **Unix CLI**, an **MCP server** (24 tools), and a **local read-only
+web view** in your browser. 456 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
 no daemon, and no account.
 
 There is no hosted version and there will not be one. This project is *structurally incapable* of holding
@@ -106,7 +106,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 396 of them across seven
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 456 of them across eight
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -318,6 +318,62 @@ can be walked without guessing when to stop.
 
 ---
 
+## Preview anything
+
+```bash
+postledger post --key inv-99 --dry-run ...
+```
+
+The dry run performs the **real** write — every trigger, every constraint — and then rolls it back.
+Simulating the checks instead would mean a second implementation of them, and the second implementation
+is the one that drifts. It also never touches the idempotency table, so previewing does not consume the
+key the real call still needs. The response says `ids_are_preview_only`, because the entry id it shows
+belongs to a transaction that no longer exists.
+
+## Closing the books
+
+```bash
+postledger close 2026-03-31 --name "FY2026 Q1" --note "reviewed with accountant"
+postledger close reopen 1 --reason "a supplier invoice arrived late"
+postledger periods
+```
+
+A close is an event, not a setting: it has a name you can say out loud, it can be listed, and reopening
+it is recorded with a reason rather than being a silent rewind of a number. In a ledger where every
+correction is visible, closing the books should not be the one operation that leaves no trace. The
+period table is append-only too — the date and name of a close cannot be edited, and a close can be
+reopened exactly once.
+
+## Bank statements
+
+```bash
+postledger read-statement march.csv --date Date --desc Description --amount Amount --ref Reference
+```
+
+**Nothing is posted.** A statement line tells you money moved and roughly why; it does not tell you
+which account the other side belongs to. That is a judgement call, and here the caller making it is
+usually a model — which does it better than any rules table. So this parses, normalises and fingerprints,
+then hands the rows back.
+
+Each candidate carries a `suggested_key` (use it as the idempotency key, so re-importing the same file
+is a no-op) and an `already_posted` flag. Handles European and Anglo decimals, accounting parentheses,
+currency symbols, split debit/credit columns, and card statements where a purchase is printed positive.
+
+It refuses to guess exactly two things, because guessing either one silently corrupts the whole file:
+
+> `the date "03/04/2026" on line 2 could be either day-first or month-first` — *both parts are 12 or
+> less, so there is no way to tell. Pass date_format as "dmy" or "mdy".*
+
+## An operating manual for the model
+
+`postledger_manual` — mounted three ways so a model finds it however it looks: as the MCP `instructions`
+handed over at initialize, as `postledger://manual/*` resources, and as a plain read-only tool. Eight
+topics covering posting safely, correcting mistakes, checking against reality, importing statements,
+closing periods, reading the forensic signals — and one titled **what this cannot do**, which forbids
+describing this ledger as tamper-proof or blockchain-backed. A test asserts that topic still says so.
+
+---
+
 ## The check that looks outward
 
 The hash chain proves nobody altered what is written down. It cannot tell you something was never
@@ -443,7 +499,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 396 assertions
+npm test                       # 456 assertions
 node src/cli.ts --help
 ```
 
@@ -496,7 +552,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-396 assertions across seven suites: schema invariants, money arithmetic, the engine, forensics, reports
+456 assertions across eight suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License

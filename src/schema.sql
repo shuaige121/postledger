@@ -199,7 +199,10 @@ BEGIN
       ) < 0
   );
 
-  -- Lock date: stops an agent from backdating an entry into an already-closed period
+  -- Closed periods live in their own table (added in migration v4). A fresh
+  -- book runs the migrations right after this file, so the trigger is replaced
+  -- there; this clause is the v1 behaviour and stays only so that a book which
+  -- somehow stops at v1 still refuses to post into a locked period.
   SELECT RAISE(ABORT, 'postledger: date is on or before the lock date')
   WHERE NEW.date <= COALESCE((SELECT value FROM meta WHERE key = 'lock_date'), '');
 

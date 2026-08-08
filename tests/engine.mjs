@@ -305,7 +305,10 @@ console.log('\n\x1b[1mI. Period locking\x1b[0m');
     () => L.post(ENTRY({ idempotencyKey: 'i1', date: '2026-07-20' })));
   const r = L.post(ENTRY({ idempotencyKey: 'i2', date: '2026-08-01' }));
   eq('I2 posting after the lock date works normally', r.ok, true);
-  rejects('I3 lock date cannot move backward', 'LOCK_DATE_REGRESSION', () => L.lock('2026-06-30'));
+  // The lock is now expressed as a named period close, so an earlier date is
+  // refused as "already covered by <that close>" — same guarantee, and the
+  // error names which close is in the way.
+  rejects('I3 the lock cannot move backward', 'ALREADY_CLOSED', () => L.lock('2026-06-30'));
   L.close();
 }
 

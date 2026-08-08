@@ -24,7 +24,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 interface Migration {
   version: number;
@@ -120,6 +120,114 @@ ALTER TABLE postings ADD COLUMN fx_amount   INTEGER;
 ALTER TABLE entries ADD COLUMN tags TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_postings_tax ON postings (tax_code) WHERE tax_code IS NOT NULL;
+`,
+  },
+  {
+    version: 4,
+    description: 'named, reopenable period closes',
+    sql: `
+-- Period closes, replacing a single lock_date scalar in meta.
+--
+-- A scalar can only move forward and remembers nothing. A close is an event:
+-- it has a name you can refer to in conversation ("FY2026 Q1"), it can be
+-- listed, and reopening it leaves a record of who reopened it and why instead
+-- of silently rewinding a number. In a ledger where every other correction is
+-- visible, closing the books should not be the one operation with no history.
+CREATE TABLE IF NOT EXISTS period_closes (
+  seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT    NOT NULL,
+  -- Everything dated on or before this is closed.
+  as_of       TEXT    NOT NULL,
+  closed_at   TEXT    NOT NULL,
+  closed_by   TEXT,
+  note        TEXT,
+  -- NULL means still closed. Set means it was deliberately reopened.
+  reopened_at   TEXT,
+  reopened_by   TEXT,
+  reopen_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_period_open ON period_closes (as_of) WHERE reopened_at IS NULL;
+
+-- Rows may be updated ONLY to reopen, and only once. Everything else about a
+-- close is a historical fact.
+CREATE TRIGGER IF NOT EXISTS period_close_only_reopen
+BEFORE UPDATE ON period_closes
+BEGIN
+  SELECT RAISE(ABORT, 'postledger: a period close is immutable except for reopening it once')
+  WHERE OLD.name <> NEW.name OR OLD.as_of <> NEW.as_of
+     OR OLD.closed_at <> NEW.closed_at
+     OR OLD.reopened_at IS NOT NULL;
+END;
+
+CREATE TRIGGER IF NOT EXISTS period_close_no_delete
+BEFORE DELETE ON period_closes
+BEGIN SELECT RAISE(ABORT, 'postledger: period closes are append-only; reopen instead of deleting'); END;
+
+-- Carry over an existing lock_date so nothing silently unlocks on upgrade.
+INSERT INTO period_closes (name, as_of, closed_at, note)
+SELECT 'imported lock date', value, datetime('now'), 'migrated from meta.lock_date'
+FROM meta WHERE key = 'lock_date';
+
+-- The seal trigger has to consult the new table. SQLite cannot alter a
+-- trigger, so it is dropped and recreated with the period check swapped in.
+-- Every other clause is reproduced byte for byte; changing one here without
+-- changing schema.sql would leave new books and upgraded books enforcing
+-- different rules.
+DROP TRIGGER IF EXISTS entry_seal;
+CREATE TRIGGER entry_seal
+BEFORE INSERT ON entries
+BEGIN
+  SELECT RAISE(ABORT, 'postledger: declared_legs mismatch — a line was probably dropped or duplicated')
+  WHERE (SELECT COUNT(*) FROM postings WHERE entry_id = NEW.id) <> NEW.declared_legs;
+
+  SELECT RAISE(ABORT, 'postledger: an entry needs at least 2 postings')
+  WHERE (SELECT COUNT(*) FROM postings WHERE entry_id = NEW.id) < 2;
+
+  SELECT RAISE(ABORT, 'postledger: unbalanced entry (debits != credits)')
+  WHERE (SELECT COALESCE(SUM(CASE WHEN side = 'debit' THEN amount ELSE -amount END), 0)
+         FROM postings WHERE entry_id = NEW.id) <> 0;
+
+  SELECT RAISE(ABORT, 'postledger: declared_total mismatch — the declared total disagrees with the legs')
+  WHERE (SELECT COALESCE(SUM(CASE WHEN side = 'debit' THEN amount ELSE 0 END), 0)
+         FROM postings WHERE entry_id = NEW.id) <> NEW.declared_total;
+
+  SELECT RAISE(ABORT, 'postledger: entry references a closed account')
+  WHERE EXISTS (
+    SELECT 1 FROM postings p JOIN accounts a ON a.id = p.account_id
+    WHERE p.entry_id = NEW.id AND a.closed_at IS NOT NULL
+  );
+
+  SELECT RAISE(ABORT, 'postledger: entry would drive an account below zero, and that account does not allow a negative balance')
+  WHERE EXISTS (
+    SELECT 1
+    FROM (SELECT DISTINCT account_id FROM postings WHERE entry_id = NEW.id) t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE a.allow_negative = 0
+      AND (
+        SELECT COALESCE(SUM(
+          CASE WHEN a.type IN ('asset','expense')
+               THEN CASE WHEN p.side = 'debit'  THEN p.amount ELSE -p.amount END
+               ELSE CASE WHEN p.side = 'credit' THEN p.amount ELSE -p.amount END
+          END), 0)
+        FROM postings p
+        WHERE p.account_id = t.account_id
+          AND (p.entry_id = NEW.id
+               OR EXISTS (SELECT 1 FROM entries e WHERE e.id = p.entry_id))
+      ) < 0
+  );
+
+  SELECT RAISE(ABORT, 'postledger: date falls in a closed period')
+  WHERE EXISTS (SELECT 1 FROM period_closes
+                 WHERE reopened_at IS NULL AND NEW.date <= as_of);
+
+  SELECT RAISE(ABORT, 'postledger: seq must be exactly prev + 1')
+  WHERE NEW.seq <> COALESCE((SELECT MAX(seq) FROM entries), 0) + 1;
+
+  SELECT RAISE(ABORT, 'postledger: prev_hash does not match the current chain head')
+  WHERE COALESCE(NEW.prev_hash, '') <>
+        COALESCE((SELECT hash FROM entries WHERE seq = NEW.seq - 1), '');
+END;
 `,
   },
 ];

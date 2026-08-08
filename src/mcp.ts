@@ -23,6 +23,7 @@
  */
 
 import { Ledger, PostledgerError } from './ledger.ts';
+import { MANUAL, INSTRUCTIONS, manual } from './manual.ts';
 import { createInterface } from 'node:readline';
 
 const AMOUNT_DESC =
@@ -36,6 +37,20 @@ const IDEM_DESC =
 
 const TOOLS = [
   // ---- read ----------------------------------------------------------------
+  {
+    name: 'postledger_manual',
+    description:
+      'How to use this ledger well: posting safely, correcting mistakes, checking against reality, ' +
+      'importing statements, closing periods, reading the forensic signals, and — stated plainly — ' +
+      'what this system cannot do. Call with no topic for the list. ' +
+      'Worth reading before a task you have not done here before.',
+    inputSchema: {
+      type: 'object',
+      properties: { topic: { type: 'string', description: 'Omit to list the available topics' } },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
   {
     name: 'postledger_chart',
     description:
@@ -232,6 +247,71 @@ const TOOLS = [
     readOnly: true,
   },
   {
+    name: 'postledger_close_period',
+    description:
+      'Close a period: nothing dated on or before this can be posted afterwards. ' +
+      'Give it a name you would use out loud ("FY2026 Q1"). Reopening later is possible and is ' +
+      'permanently recorded with a reason — closing the books is not the one operation that leaves no trace.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' }, as_of: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        note: { type: 'string' }, actor: { type: 'string' },
+      },
+      required: ['name', 'as_of'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_reopen_period',
+    description:
+      'Reopen a closed period. Requires a reason, which goes into the permanent record. ' +
+      'Possible once per close. Ask the user before doing this — it unlocks books somebody deliberately shut.',
+    inputSchema: {
+      type: 'object',
+      properties: { seq: { type: 'integer' }, reason: { type: 'string' }, actor: { type: 'string' } },
+      required: ['seq', 'reason'], additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_read_statement',
+    description:
+      'Parse a bank/card statement CSV into candidate transactions. NOTHING IS POSTED.\n\n' +
+      'A statement line tells you money moved and roughly why. It does not tell you which account the ' +
+      'other side belongs to — that is your judgement, which is why this hands the rows back instead of ' +
+      'guessing with a rules table.\n\n' +
+      'Each candidate carries a suggested_key and an already_posted flag. Use suggested_key as the ' +
+      'idempotency_key when you post it, so re-importing the same statement is a no-op.\n\n' +
+      'It refuses to guess two things: an ambiguous date like 03/04/2026 (pass date_format), and the ' +
+      'sign convention on card statements (pass invert_sign). Guessing either one silently corrupts ' +
+      'every row in the file.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        csv: { type: 'string', description: 'The file contents' },
+        date: { type: 'string', description: 'Column name (or index) holding the date' },
+        amount: { type: 'string', description: 'Single signed amount column' },
+        debit: { type: 'string', description: 'Or: money-out column' },
+        credit: { type: 'string', description: 'Or: money-in column' },
+        description: { type: 'string' },
+        reference: { type: 'string', description: 'Bank reference / FITID column. Map it if present — a ' +
+          'real reference identifies a row far better than a hash of its contents.' },
+        date_format: { type: 'string', enum: ['dmy', 'mdy', 'ymd'] },
+        invert_sign: { type: 'boolean', description: 'True when a positive number means money LEAVING (typical of card statements)' },
+        delimiter: { type: 'string' },
+        has_header: { type: 'boolean', default: true },
+      },
+      required: ['csv', 'date', 'description'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_periods',
+    description: 'Every period close, including reopened ones, and how far the books are currently closed.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+  },
+  {
     name: 'postledger_actors',
     description:
       'Who has written to this book, with entry counts. NOTE: actor is self-declared, not authenticated — ' +
@@ -310,6 +390,10 @@ const TOOLS = [
             'They are covered by the entry hash, so they CANNOT be added or changed afterwards — ' +
             'set them now or never.' },
         actor: { type: 'string', description: 'Who is posting, e.g. "agent:claude". Recorded as a CLAIM, not verified.' },
+        dry_run: { type: 'boolean',
+          description: 'Run every check and the real write, then roll it back. Nothing is stored and the ' +
+            'idempotency key is NOT consumed, so the same key is still available for the real call. ' +
+            'The returned entry_id belongs to a rolled-back transaction — never reuse it.' },
         expect_balance_after: {
           type: 'object',
           description: 'Optional stronger assertion: what one account should total after this entry. ' +
@@ -385,6 +469,7 @@ const TOOLS = [
 type Handler = (L: Ledger, args: any) => unknown;
 
 const HANDLERS: Record<string, Handler> = {
+  postledger_manual: (_L, a) => manual(a?.topic),
   postledger_chart: (L) => ({ ok: true, currency: L.currency.code, accounts: L.accounts() }),
   postledger_balance: (L, a) => (a.prefix !== undefined
     ? L.balanceTree(a.prefix)
@@ -401,6 +486,15 @@ const HANDLERS: Record<string, Handler> = {
   postledger_verify: (L) => L.verify(),
   postledger_audit: (L, a) => L.auditSignals(a ?? {}),
   postledger_actors: (L) => L.actors(),
+  postledger_close_period: (L, a) => L.closePeriod(a.name, a.as_of, { actor: a.actor, note: a.note }),
+  postledger_reopen_period: (L, a) => L.reopenPeriod(a.seq, a.reason, { actor: a.actor }),
+  postledger_periods: (L) => L.periods(),
+  postledger_read_statement: (L, a) => L.readStatement(a.csv, {
+    date: a.date, amount: a.amount, debit: a.debit, credit: a.credit,
+    description: a.description, reference: a.reference,
+    dateFormat: a.date_format, invertSign: a.invert_sign,
+    delimiter: a.delimiter, hasHeader: a.has_header !== false,
+  }),
   postledger_assert_balance: (L, a) => L.assertBalance(a.account, a.amount,
     { subtree: a.subtree, note: a.note, actor: a.actor }),
   postledger_list_assertions: (L, a) => L.assertions(a ?? {}),
@@ -421,7 +515,7 @@ const HANDLERS: Record<string, Handler> = {
       })),
       expectedTotal: a.expected_total, actor: a.actor, tags: a.tags,
       expectBalanceAfter: a.expect_balance_after,
-    }),
+    }, { dryRun: a.dry_run === true }),
 
   postledger_reverse_entry: (L, a) =>
     L.reverse(a.entry_id, { idempotencyKey: a.idempotency_key, reason: a.reason, date: a.date, actor: a.actor }),
@@ -468,19 +562,9 @@ export async function runMcpServer(bookPath: string): Promise<void> {
         case 'initialize':
           reply(id, {
             protocolVersion: params?.protocolVersion ?? '2025-06-18',
-            capabilities: { tools: {} },
+            capabilities: { tools: {}, resources: {} },
             serverInfo: { name: 'postledger', version: '0.1.0' },
-            instructions:
-              'Double-entry bookkeeping with database-enforced invariants.\n\n' +
-              'Call postledger_chart before posting — accounts must already exist and inventing one is rejected.\n' +
-              'Every write needs an idempotency_key derived from the real-world event, so retries are safe.\n' +
-              'Amounts are always strings, never JSON numbers.\n' +
-              'Never invent a figure, a date, or a counterparty: post what the source document says, and ask ' +
-              'when something is unknown.\n' +
-              'Corrections are reversals, never edits.\n' +
-              'The chain proves nothing was altered; it cannot tell you something was never recorded. ' +
-              'Use postledger_assert_balance after checking against a statement — that is the only ' +
-              'check that catches a missing entry.',
+            instructions: INSTRUCTIONS,
           });
           break;
 
@@ -519,6 +603,26 @@ export async function runMcpServer(bookPath: string): Promise<void> {
           } finally {
             L.close();
           }
+          break;
+        }
+
+        case 'resources/list':
+          reply(id, {
+            resources: MANUAL.map((m) => ({
+              uri: `postledger://manual/${m.topic}`,
+              name: m.topic,
+              description: m.summary,
+              mimeType: 'application/json',
+            })),
+          });
+          break;
+
+        case 'resources/read': {
+          const uri = String(params?.uri ?? '');
+          const topic = uri.replace('postledger://manual/', '');
+          const doc = manual(topic);
+          if (!doc.ok) { failRpc(id, -32602, `unknown manual topic: ${topic}`); break; }
+          reply(id, { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(doc, null, 2) }] });
           break;
         }
 
