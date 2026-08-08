@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['22.6', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node }}' }
+      - run: npm ci --ignore-scripts
+      - run: npm test
+        env: { NODE_OPTIONS: --no-warnings }
+
+  # The published package is NOT the source tree. Node refuses to strip types
+  # from anything under node_modules, so shipping .ts files produces a package
+  # that installs fine and then crashes on first run. This job installs the
+  # real tarball into a clean directory and drives the binary — the only way
+  # that failure mode is visible.
+  packaged:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm pack
+      - name: install the tarball somewhere clean and use it
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE"/postledger-*.tgz
+          export PATH="/tmp/consumer/node_modules/.bin:$PATH"
+          export NODE_OPTIONS=--no-warnings
+          postledger init book.db --name CI --currency USD
+          export POSTLEDGER_BOOK=book.db
+          postledger account open Assets:Bank:Checking --type asset
+          postledger account open Income:Sales --type income
+          postledger post --key k1 --date 2026-01-01 --desc "CI entry" \
+            --leg "Assets:Bank:Checking debit 100.00" \
+            --leg "Income:Sales credit 100.00" --expect-total 100.00
+          # replaying the same key must not create a second entry
+          postledger post --key k1 --date 2026-01-01 --desc "CI entry" \
+            --leg "Assets:Bank:Checking debit 100.00" \
+            --leg "Income:Sales credit 100.00" --expect-total 100.00
+          test "$(postledger info --compact | grep -o '"entries":[0-9]*' | cut -d: -f2)" = "1"
+          postledger balance-sheet --compact | grep -q '"holds":true'
+          postledger verify
+          echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            | postledger mcp --book book.db | grep -q '"serverInfo"'
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The image runs the whole suite during build, so a green build here
+      # means the published image is one that keeps its promises.
+      - run: docker build -t postledger:ci .
+      - run: docker run --rm postledger:ci --help

@@ -302,9 +302,15 @@ prefix. That removes parent ids, closure tables, and subtree moves in one stroke
 **One currency per book.** Multi-currency drags in rates, translation, and revaluation — half a project.
 Need another currency? Open another book.
 
-**Zero dependencies.** Node 22.6+ runs TypeScript directly and ships `node:sqlite`, so there is no build
-step and no supply chain. The MCP server is ~350 lines of newline-delimited JSON-RPC rather than an SDK,
-because a financial tool people are asked to audit should be readable end to end.
+**Zero runtime dependencies.** The only thing the published package imports is `node:` builtins —
+`node:sqlite` for storage, `node:http` for the web view, `node:crypto` for the chain. TypeScript is a
+build-time dependency and nothing else. The MCP server is ~350 lines of newline-delimited JSON-RPC rather
+than an SDK, because a financial tool people are asked to audit should be readable end to end.
+
+(During development Node runs the `.ts` sources directly, so there is no build step in the loop. The
+package is compiled for publication because Node deliberately refuses to strip types from anything under
+`node_modules` — shipping `.ts` files would install cleanly and then crash on first run. CI installs the
+real tarball into a clean directory and drives the binary, so that failure mode cannot come back.)
 
 **Deliberately not in v1:** multi-currency, invoice/AR/AP state machines, period-close automation, a web
 UI, bank imports. None of them change whether an AI can keep books safely, which is the only thing this

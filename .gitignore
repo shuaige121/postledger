@@ -1,8 +1,9 @@
 node_modules/
+dist/
+*.tgz
 *.db
 *.db-wal
 *.db-shm
 books/
 documents/
 anchors.log
-.github/workflows/

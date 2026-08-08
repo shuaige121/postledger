@@ -27,15 +27,17 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "postledger": "./src/cli.ts"
+    "postledger": "./dist/cli.js"
   },
   "exports": {
-    ".": "./src/ledger.ts",
-    "./money": "./src/money.ts",
-    "./audit": "./src/audit.ts"
+    ".": "./dist/ledger.js",
+    "./money": "./dist/money.js",
+    "./audit": "./dist/audit.js",
+    "./reports": "./dist/reports.js",
+    "./interop": "./dist/interop.js"
   },
   "files": [
-    "src/",
+    "dist/",
     "server.json",
     "README.md",
     "LICENSE"
@@ -50,9 +52,11 @@
     "test:engine": "node tests/engine.mjs",
     "test:forensics": "node tests/forensics.mjs",
     "test:e2e": "node tests/e2e.mjs",
-    "test:reports": "node tests/reports.mjs"
+    "test:reports": "node tests/reports.mjs",
+    "build": "tsc && cp src/schema.sql dist/",
+    "prepublishOnly": "npm run build && npm test",
+    "clean": "rm -rf dist"
   },
-  "dependencies": {},
   "repository": {
     "type": "git",
     "url": "git+https://github.com/OWNER/postledger.git"
@@ -61,5 +65,10 @@
     "url": "https://github.com/OWNER/postledger/issues"
   },
   "homepage": "https://github.com/OWNER/postledger#readme",
-  "mcpName": "dev.postledger/postledger"
+  "mcpName": "dev.postledger/postledger",
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
+  },
+  "types": "./dist/ledger.d.ts"
 }
