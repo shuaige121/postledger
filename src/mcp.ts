@@ -167,6 +167,56 @@ const TOOLS = [
     readOnly: true,
   },
   {
+    name: 'postledger_assert_balance',
+    description:
+      'Confirm that an account holds exactly this much RIGHT NOW, and record that confirmation ' +
+      'permanently.\n\n' +
+      'This is the only check in the system that looks outward. The hash chain proves nobody altered ' +
+      'what is written down; it cannot tell you something was never written down at all. An entry that ' +
+      'was simply missed leaves books that are internally flawless and wrong — chain intact, trial ' +
+      'balance level, accounting identity satisfied.\n\n' +
+      'Use it after comparing against something real: a bank statement, a card statement, a counted ' +
+      'cash drawer. If the figure disagrees with the books the call is REJECTED and reports the ' +
+      'difference — that is the point. Do not go looking for a way to record it anyway; find what is ' +
+      'missing and post it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string' },
+        amount: { type: 'string', description: 'The real balance you are confirming. ' + AMOUNT_DESC },
+        subtree: { type: 'boolean', default: false,
+          description: 'True if the figure covers this account and everything beneath it ' +
+                       '("Assets" covering "Assets:Bank:Checking").' },
+        note: { type: 'string', description: 'What it was checked against, e.g. "July bank statement"' },
+        actor: { type: 'string' },
+      },
+      required: ['account', 'amount'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_list_assertions',
+    description: 'Every balance ever confirmed, newest first. Shows what was checked, when, and against what.',
+    inputSchema: {
+      type: 'object',
+      properties: { account: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 500 } },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_stale_assertions',
+    description:
+      'Accounts that were confirmed once and have moved a lot since. An account that looks tended but ' +
+      'is not is more dangerous than one nobody ever claimed to watch. Use it to decide what to reconcile next.',
+    inputSchema: {
+      type: 'object',
+      properties: { days: { type: 'integer', minimum: 1, default: 30 } },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
     name: 'postledger_actors',
     description:
       'Who has written to this book, with entry counts. NOTE: actor is self-declared, not authenticated — ' +
@@ -317,6 +367,10 @@ const HANDLERS: Record<string, Handler> = {
   postledger_verify: (L) => L.verify(),
   postledger_audit: (L, a) => L.auditSignals(a ?? {}),
   postledger_actors: (L) => L.actors(),
+  postledger_assert_balance: (L, a) => L.assertBalance(a.account, a.amount,
+    { subtree: a.subtree, note: a.note, actor: a.actor }),
+  postledger_list_assertions: (L, a) => L.assertions(a ?? {}),
+  postledger_stale_assertions: (L, a) => L.staleAssertions({ withinDays: a?.days }),
   postledger_ageing: (L, a) => L.ageing(a.account, { asOf: a.as_of }),
   postledger_allocate: (L, a) => L.allocate(a.amount, a.ratios),
 
@@ -384,7 +438,10 @@ export async function runMcpServer(bookPath: string): Promise<void> {
               'Amounts are always strings, never JSON numbers.\n' +
               'Never invent a figure, a date, or a counterparty: post what the source document says, and ask ' +
               'when something is unknown.\n' +
-              'Corrections are reversals, never edits.',
+              'Corrections are reversals, never edits.\n' +
+              'The chain proves nothing was altered; it cannot tell you something was never recorded. ' +
+              'Use postledger_assert_balance after checking against a statement — that is the only ' +
+              'check that catches a missing entry.',
           });
           break;
 

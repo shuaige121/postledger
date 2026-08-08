@@ -19,6 +19,7 @@ import { Money, currencyOf, type Currency } from './money.ts';
 import { benford, roundNumbers, duplicateAmounts, thresholdClustering, outliers, timingPattern } from './audit.ts';
 import { balanceSheet, incomeStatement, ageing, type BalanceRow } from './reports.ts';
 import { toJournal, fromJournal, type ExportEntry } from './interop.ts';
+import { migrate, CURRENT_SCHEMA_VERSION } from './migrations.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -230,8 +231,12 @@ export class Ledger {
     ins.run('book_name', opts.name);
     ins.run('currency', cur.code);
     ins.run('currency_decimals', String(cur.decimals));
-    ins.run('schema_version', '1');
+    ins.run('schema_version', String(CURRENT_SCHEMA_VERSION));
     ins.run('created_at', nowIso());
+    // schema.sql describes v1; everything added since lives in migrations, so
+    // a fresh book runs them too rather than keeping two copies of each table.
+    db.prepare("UPDATE meta SET value='1' WHERE key='schema_version'").run();
+    migrate(db);
     return new Ledger(db, path);
   }
 
@@ -244,6 +249,9 @@ export class Ledger {
     // PRAGMAs are connection-scoped and must be reset on every open, or foreign keys are effectively off
     db.exec('PRAGMA foreign_keys = ON');
     db.exec('PRAGMA busy_timeout = 5000');
+    // A book outlives the code that wrote it. Bring it forward on open —
+    // additive and idempotent, so this is safe to run every time.
+    migrate(db);
     return new Ledger(db, path);
   }
 
@@ -1005,8 +1013,9 @@ export class Ledger {
    *
    * The third is the easiest to skip: storing a sha256 you never check against is the same as not storing it.
    */
-  verify(opts: { chain?: boolean; balance?: boolean; documents?: boolean } = {}) {
-    const run = { chain: opts.chain !== false, balance: opts.balance !== false, documents: opts.documents !== false };
+  verify(opts: { chain?: boolean; balance?: boolean; documents?: boolean; assertions?: boolean } = {}) {
+    const run = { chain: opts.chain !== false, balance: opts.balance !== false,
+                  documents: opts.documents !== false, assertions: opts.assertions !== false };
     const problems: Array<{ check: string; problem: string; where?: unknown }> = [];
 
     if (run.chain) {
@@ -1077,6 +1086,33 @@ export class Ledger {
         const actual = sha256(readFileSync(abs));
         if (actual !== d.sha256) {
           problems.push({ check: 'documents', problem: 'archived file has been replaced (fingerprint mismatch)', where: { expected: d.sha256, actual, path: d.rel_path } });
+        }
+      }
+    }
+
+    if (run.assertions) {
+      // Re-check every assertion ever recorded against the journal as it
+      // stands now. This is the check that looks outward: the others prove the
+      // ledger is internally consistent, this one is the only evidence that it
+      // still matches what somebody once confirmed against reality.
+      //
+      // An assertion breaking does NOT mean the assertion is wrong. It means
+      // the ledger changed underneath a checkpoint — which for an append-only
+      // ledger means an entry was back-dated into a period already confirmed.
+      const rows = this.db.prepare('SELECT * FROM assertions ORDER BY seq').all() as any[];
+      for (const a of rows) {
+        const actual = this.balanceUpTo(a.account, a.date, Number(a.subtree) === 1);
+        if (actual !== BigInt(a.amount)) {
+          problems.push({
+            check: 'assertions',
+            problem: `assertion #${Number(a.seq)} no longer holds: ${a.account} was confirmed at ` +
+              `${Money.ofMinor(BigInt(a.amount), this.currency).format()} as of ${a.date}, but now ` +
+              `recomputes to ${Money.ofMinor(actual, this.currency).format()} — something was ` +
+              `posted into a period that had already been confirmed`,
+            where: { assertion_seq: Number(a.seq), account: a.account, date: a.date,
+                     confirmed: Money.ofMinor(BigInt(a.amount), this.currency).format(),
+                     recomputed: Money.ofMinor(actual, this.currency).format() },
+          });
         }
       }
     }
@@ -1204,6 +1240,184 @@ export class Ledger {
       sum: parts.reduce((s, p) => s.add(p), Money.zero(this.currency)).format(),
       currency: this.currency.code,
       note: 'The parts sum exactly to the original amount. Use these figures verbatim; do not round them.',
+    };
+  }
+
+
+  /**
+   * Balance of an account at the END of a business date.
+   *
+   * Deliberately by date, not by chain position. Anchoring to seq looks more
+   * rigorous — seq is total and monotonic, a date is not — but in an
+   * append-only ledger it makes the assertion vacuous: a new entry always gets
+   * a higher seq, so "the balance as of seq 47" can never change, and the
+   * check can only ever re-confirm what the hash chain already proved.
+   *
+   * The whole point of an assertion is to catch the entry that was missed and
+   * posted later. Backdating a July entry changes what July closed at, and
+   * that divergence is exactly what is worth failing on.
+   *
+   * "End of that date" — every entry dated on or before it counts, same
+   * convention as hledger. Several entries sharing a date is fine: they are
+   * all either in or out together.
+   */
+  private balanceUpTo(account: string, date: string, subtree: boolean): bigint {
+    const row = this.db.prepare(`
+      SELECT COALESCE(SUM(
+        CASE WHEN a.type IN ('asset','expense')
+             THEN CASE WHEN p.side = 'debit'  THEN p.amount ELSE -p.amount END
+             ELSE CASE WHEN p.side = 'credit' THEN p.amount ELSE -p.amount END
+        END), 0) AS bal
+      FROM postings p
+      JOIN entries  e ON e.id = p.entry_id
+      JOIN accounts a ON a.id = p.account_id
+      WHERE e.date <= ?
+        AND (p.account_id = ? OR (? = 1 AND p.account_id LIKE ?))
+    `).get(date, account, subtree ? 1 : 0, account + ':%') as any;
+    return BigInt(row.bal);
+  }
+
+  /**
+   * Record that an account held exactly this much, right now.
+   *
+   * This is the one check that looks outward. The hash chain proves nobody
+   * altered what is written down; it cannot tell you something was never
+   * written down at all. An entry that was simply missed leaves a book that is
+   * internally flawless — chain intact, trial balance level, accounting
+   * identity satisfied — and wrong. Comparing against a bank statement is the
+   * only way that surfaces, and an assertion is how that comparison is kept.
+   *
+   * A mismatch is refused rather than recorded. An assertion that is known to
+   * disagree with the books is not a checkpoint, it is a note saying the books
+   * are wrong — and it belongs in a correcting entry, not here.
+   */
+  assertBalance(account: string, amount: string, opts: {
+    subtree?: boolean; note?: string; actor?: string; date?: string;
+  } = {}) {
+    if (!this.db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(account)) {
+      throw err('UNKNOWN_ACCOUNT', `account ${JSON.stringify(account)} does not exist`,
+        'Use postledger_chart to see the available accounts.',
+        { did_you_mean: this.suggestAccounts(account) });
+    }
+    const claimed = Money.fromJson(amount, this.currency);
+    const date = opts.date ?? nowIso().slice(0, 10);
+    if (!ISO_DATE.test(date)) {
+      throw err('BAD_DATE', `date ${JSON.stringify(date)} is not YYYY-MM-DD`, 'Use an ISO date like "2026-08-08".');
+    }
+    const head = this.db.prepare('SELECT MAX(seq) m FROM entries').get() as any;
+    const atSeq = Number(head?.m ?? 0);
+    const subtree = opts.subtree ?? false;
+    const actual = Money.ofMinor(this.balanceUpTo(account, date, subtree), this.currency);
+
+    if (!actual.equals(claimed)) {
+      const diff = claimed.subtract(actual);
+      throw err('ASSERTION_FAILED',
+        `${account}${subtree ? ' (with sub-accounts)' : ''} holds ${actual.format()} as of ${date}, not ${claimed.format()}`,
+        `The books and the figure you gave differ by ${diff.abs().format()}. ` +
+        `If the figure is right, something is missing from the books — find and post it, then assert again. ` +
+        `If the books are right, re-read the source. Do not record an assertion you know to be false.`,
+        { account, in_books: actual.format(), asserted: claimed.format(),
+          difference: diff.format(), as_of: date, at_entry_seq: atSeq });
+    }
+
+    this.db.prepare(
+      `INSERT INTO assertions (account,amount,at_entry_seq,date,subtree,claimed_actor,note,created_at)
+       VALUES (?,?,?,?,?,?,?,?)`,
+    ).run(account, actual.minor, BigInt(atSeq), date, subtree ? 1 : 0,
+          opts.actor ?? null, opts.note ?? null, nowIso());
+
+    return {
+      ok: true as const, account, amount: actual.format(), at_entry_seq: atSeq,
+      date, subtree, currency: this.currency.code,
+      note: 'Recorded. `postledger verify` re-checks every assertion against the journal from now on.',
+    };
+  }
+
+  /**
+   * Write an assertion for every account that currently holds a balance.
+   *
+   * The recommended way to start asserting: reconcile once by hand, then take
+   * a snapshot of everything at that moment. From then on the divergence has
+   * somewhere to be caught.
+   */
+  generateAssertions(opts: { types?: string[]; actor?: string; note?: string } = {}) {
+    const types = opts.types ?? ['asset', 'liability'];
+    const rows = this.db.prepare(
+      `SELECT account_id, balance FROM v_balances WHERE balance <> 0
+         AND account_id IN (SELECT id FROM accounts WHERE type IN (${types.map(() => '?').join(',')})
+                                                      AND closed_at IS NULL)
+       ORDER BY account_id`).all(...types) as any[];
+
+    const written = rows.map((r) => this.assertBalance(
+      r.account_id, Money.ofMinor(BigInt(r.balance), this.currency).format(),
+      { actor: opts.actor, note: opts.note ?? 'generated snapshot' }));
+
+    return {
+      ok: true as const, generated: written.length,
+      assertions: written.map((w) => ({ account: w.account, amount: w.amount })),
+      note: written.length
+        ? 'Snapshot recorded. These only mean something if the balances were reconciled against reality first.'
+        : 'No accounts of those types hold a non-zero balance; nothing to assert.',
+    };
+  }
+
+  /** Every assertion ever recorded, newest first. */
+  assertions(opts: { account?: string; limit?: number } = {}) {
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    const where = opts.account ? 'WHERE account = ?' : '';
+    const args: any[] = opts.account ? [opts.account] : [];
+    const rows = this.db.prepare(
+      `SELECT * FROM assertions ${where} ORDER BY seq DESC LIMIT ?`).all(...args, limit) as any[];
+    return {
+      ok: true as const, count: rows.length,
+      assertions: rows.map((r) => ({
+        seq: Number(r.seq), account: r.account,
+        amount: Money.ofMinor(BigInt(r.amount), this.currency).format(),
+        at_entry_seq: Number(r.at_entry_seq), date: r.date,
+        subtree: Number(r.subtree) === 1, actor: r.claimed_actor, note: r.note,
+      })),
+    };
+  }
+
+  /**
+   * Accounts that have been asserted before but not lately.
+   *
+   * Borrowed from hledger's `check recentassertions`: it turns "we should
+   * reconcile" from a discipline into something a machine can fail on. An
+   * account you once checked and then stopped checking is more dangerous than
+   * one you never checked, because the earlier assertion makes it look tended.
+   */
+  staleAssertions(opts: { withinDays?: number } = {}) {
+    const days = opts.withinDays ?? 30;
+    const rows = this.db.prepare(`
+      SELECT a.account,
+             MAX(a.at_entry_seq) AS last_asserted_seq,
+             (SELECT MAX(e.seq) FROM postings p JOIN entries e ON e.id = p.entry_id
+               WHERE p.account_id = a.account) AS last_activity_seq,
+             (SELECT MAX(e.date) FROM postings p JOIN entries e ON e.id = p.entry_id
+               WHERE p.account_id = a.account) AS last_activity_date,
+             MAX(a.date) AS last_asserted_date
+      FROM assertions a GROUP BY a.account`).all() as any[];
+
+    const stale = rows.filter((r) => {
+      if (Number(r.last_activity_seq ?? 0) <= Number(r.last_asserted_seq)) return false;
+      const gap = (Date.parse(r.last_activity_date + 'T00:00:00Z') -
+                   Date.parse(r.last_asserted_date + 'T00:00:00Z')) / 86_400_000;
+      return gap > days;
+    });
+
+    return {
+      ok: stale.length === 0, checked: rows.length, within_days: days,
+      stale: stale.map((r) => ({
+        account: r.account, last_asserted: r.last_asserted_date,
+        entries_since: Number(r.last_activity_seq) - Number(r.last_asserted_seq),
+        last_activity: r.last_activity_date,
+      })),
+      note: rows.length === 0
+        ? 'No assertions have ever been recorded, so there is nothing to go stale. Consider `postledger assert --generate`.'
+        : stale.length === 0
+          ? 'Every asserted account has been re-checked recently enough.'
+          : 'These accounts were checked once and have moved a lot since. An account that looks tended but is not is worse than one nobody claimed to be watching.',
     };
   }
 

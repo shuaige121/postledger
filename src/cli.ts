@@ -170,7 +170,11 @@ INTEROP
   import <file> [--dry-run] [--actor <who>]   import a hledger/ledger journal
 
 INTEGRITY
-  verify [--no-chain] [--no-balance] [--no-documents]
+  assert <account> <amount> [--subtree]       confirm a balance against reality
+  assert --generate                           snapshot every asset/liability balance
+  assertions [account]                        every balance ever confirmed
+  stale-assertions [--days 30]                asserted once, moved a lot since
+  verify [--no-chain] [--no-balance] [--no-documents] [--no-assertions]
   verify-anchors <anchor-log>                 check against external witnesses
   anchor [--line]                             print the chain head to anchor elsewhere
   audit [--account <a>]                       statistical indicators (NOT evidence)
@@ -335,6 +339,24 @@ async function main() {
           account: a.flags.account as string, since: a.flags.since as string }), a);
         break;
       case 'actors':        emit(L.actors(), a); break;
+      case 'assert': {
+        if (a.flags.generate) {
+          emit(L.generateAssertions({ actor: a.flags.actor as string, note: a.flags.note as string }), a);
+        } else {
+          emit(L.assertBalance(a._[1]!, a._[2]!, {
+            subtree: !!a.flags.subtree, note: a.flags.note as string,
+            actor: a.flags.actor as string, date: a.flags.date as string,
+          }), a);
+        }
+        break;
+      }
+      case 'assertions':    emit(L.assertions({ account: a._[1], limit: a.flags.limit ? Number(a.flags.limit) : undefined }), a); break;
+      case 'stale-assertions': {
+        const st = L.staleAssertions({ withinDays: a.flags.days ? Number(a.flags.days) : undefined });
+        emit(st, a);
+        if (!st.ok) return EXIT.VERIFY;
+        break;
+      }
       case 'ageing':        emit(L.ageing(a._[1]!, { asOf: a.flags['as-of'] as string }), a); break;
       case 'allocate':
         emit(L.allocate(a._[1]!, a._.slice(2).map(Number)), a);
@@ -344,7 +366,7 @@ async function main() {
       case 'verify': {
         const v = L.verify({
           chain: !a.flags['no-chain'], balance: !a.flags['no-balance'],
-          documents: !a.flags['no-documents'],
+          documents: !a.flags['no-documents'], assertions: !a.flags['no-assertions'],
         });
         emit(v, a);
         if (!v.ok) return EXIT.VERIFY;

@@ -12,8 +12,8 @@ and no DELETE path at all; a mistake is corrected with a reversing entry. Money 
 so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
-Three surfaces over the same file: a **Unix CLI**, an **MCP server** (16 tools), and a **local read-only
-web view** in your browser. 338 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+Three surfaces over the same file: a **Unix CLI**, an **MCP server** (19 tools), and a **local read-only
+web view** in your browser. 376 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
 no daemon, and no account.
 
 There is no hosted version and there will not be one. This project is *structurally incapable* of holding
@@ -106,7 +106,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 338 of them across six
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 376 of them across seven
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -275,6 +275,47 @@ for. Nothing more.
 
 ---
 
+## The check that looks outward
+
+The hash chain proves nobody altered what is written down. It cannot tell you something was never
+written down at all — and that is the most common bookkeeping error there is.
+
+```bash
+postledger assert Assets:Bank:Checking 4820.15 --note "July statement"
+```
+
+That records a confirmation permanently. A figure that disagrees with the books is **refused**, with the
+gap stated: recording an assertion you know to be false is not a checkpoint, it is a note saying the
+books are wrong, and that belongs in a correcting entry.
+
+From then on `postledger verify` re-checks every confirmation. Back-date an entry into a month somebody
+already confirmed and it goes red, naming the assertion and the divergence.
+
+Why this matters, concretely — on a book that is missing one entry:
+
+| check | result |
+|---|---|
+| hash chain | ✅ passes |
+| trial balance | ✅ balances |
+| accounting identity | ✅ holds |
+| **balance assertion** | ❌ **caught it** |
+
+There is a test asserting exactly that table. Assertions are anchored to a **business date**, not to a
+position in the chain — anchoring to chain position would make them vacuous, since a new entry always
+lands after an old checkpoint and could never disturb it.
+
+```bash
+postledger assert --generate        # snapshot every asset and liability, once reconciled
+postledger stale-assertions         # asserted once, moved a lot since — reconcile these next
+```
+
+Deliberately **not** copied from the prior art in this space: beancount's `pad` (invents an entry to
+absorb a discrepancy) and hledger's balance assignment (works backwards from a balance to an amount).
+hledger's own documentation argues against the latter — it hides errors and weakens the audit trail. A
+gap has to be explained by a human, not absorbed by a tool.
+
+---
+
 ## Threat model, honestly
 
 **What the audit chain detects**
@@ -359,7 +400,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 338 assertions
+npm test                       # 376 assertions
 node src/cli.ts --help
 ```
 
@@ -412,7 +453,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-338 assertions across six suites: schema invariants, money arithmetic, the engine, forensics, reports
+376 assertions across seven suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License
