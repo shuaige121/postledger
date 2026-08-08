@@ -24,6 +24,7 @@
 
 import { Ledger, PostledgerError } from './ledger.ts';
 import { MANUAL, INSTRUCTIONS, manual } from './manual.ts';
+import { VERSION } from './version.ts';
 import { createInterface } from 'node:readline';
 
 const AMOUNT_DESC =
@@ -588,7 +589,7 @@ export async function runMcpServer(bookPath: string): Promise<void> {
           reply(id, {
             protocolVersion: params?.protocolVersion ?? '2025-06-18',
             capabilities: { tools: {}, resources: {} },
-            serverInfo: { name: 'postledger', version: '0.1.0' },
+            serverInfo: { name: 'postledger', version: VERSION },
             instructions: INSTRUCTIONS,
           });
           break;

@@ -24,7 +24,7 @@ Underneath, the invariants are SQLite triggers rather than application code — 
 trigger outlives the code path that was meant to enforce it. Balance, immutability, chain continuity and
 period locks are all refused by the database itself.
 
-**466 tests. Zero runtime dependencies.** One book is one SQLite file: backup is `cp`, isolation is
+**467 tests. Zero runtime dependencies.** One book is one SQLite file: backup is `cp`, isolation is
 `chmod`. Runs on Node 22.13+, needs no server, no daemon, and no account.
 
 ```bash
@@ -123,7 +123,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 466 of them across eight
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 467 of them across eight
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -516,7 +516,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 466 assertions
+npm test                       # 467 assertions
 node src/cli.ts --help
 ```
 
@@ -569,7 +569,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-466 assertions across eight suites: schema invariants, money arithmetic, the engine, forensics, reports
+467 assertions across eight suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License

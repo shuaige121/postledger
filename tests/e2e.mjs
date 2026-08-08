@@ -298,6 +298,16 @@ console.log('\n\x1b[1mI0. --version reports the real version\x1b[0m');
   const out = cli('--version').stdout.trim();
   eq('I0a --version prints a version, not the help text', out.includes('USAGE'), false);
   eq('I0b and it matches package.json', out, pkg.version);
+
+  // The MCP handshake reports a version too, and it had its own hardcoded copy
+  // that drifted independently of the CLI's. One source or they disagree.
+  const { spawnSync } = await import('node:child_process');
+  const hs = spawnSync('node', [CLI, 'mcp', '--book', BOOK], {
+    env, input: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+    encoding: 'utf8', timeout: 15000,
+  });
+  const info = JSON.parse(hs.stdout.trim().split('\n')[0]).result.serverInfo;
+  eq('I0c the MCP handshake reports the same version', info.version, pkg.version);
 }
 
 console.log('\n\x1b[1mI. Newly exposed capabilities\x1b[0m');

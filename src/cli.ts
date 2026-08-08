@@ -11,18 +11,7 @@
 
 import { Ledger, PostledgerError } from './ledger.ts';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-
-// Read the version from package.json rather than keeping a copy here. A
-// hand-maintained constant had already drifted — it still said 0.1.0 after
-// 0.1.1 shipped, so `--version` lied to anyone who asked.
-const VERSION: string = (() => {
-  try {
-    return (createRequire(import.meta.url)('../package.json') as { version: string }).version;
-  } catch {
-    return 'unknown';
-  }
-})();
+import { VERSION } from './version.ts';
 
 // Exit codes are part of the interface — scripts will depend on them
 const EXIT = {
