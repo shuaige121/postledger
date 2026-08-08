@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "dev.postledger/postledger",
+  "description": "Idempotent, append-only double-entry ledger with a hash-chained audit trail. SQLite, CLI + MCP.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/OWNER/postledger",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "postledger",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "isRequired": true
+        },
+        {
+          "type": "named",
+          "name": "--book",
+          "description": "Absolute path to the ledger file",
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

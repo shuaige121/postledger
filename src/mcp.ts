@@ -1,0 +1,399 @@
+/**
+ * MCP server — stdio transport, zero dependencies.
+ *
+ * MCP's stdio transport is just newline-delimited JSON-RPC 2.0, and the core
+ * surface is only three methods: initialize / tools/list / tools/call.
+ * Pulling in an SDK for that little would cost the whole project its
+ * "zero dependencies" property — not a good trade for a financial tool
+ * that's meant to be audited by other people.
+ *
+ * Design principle for the tool surface: **make the model unable to get it
+ * wrong, rather than catching it after it does**.
+ *   - Every write requires idempotency_key (retries are the normal case,
+ *     not the exception)
+ *   - post requires expected_total (a self-reported figure for cross-checking,
+ *     which catches a missing line or a bad sum)
+ *   - Amounts are always strings (a JSON number is a float — it's already
+ *     imprecise before validation ever sees it)
+ *   - A misspelled account returns candidates instead of leaving the model
+ *     to keep guessing
+ *   - Every error carries a hint, and the hint is **the next action to take**
+ *   - Every write echoes back the chain head, which lands in the conversation
+ *     transcript — a witness that even root on this machine can't edit
+ */
+
+import { Ledger, PostledgerError } from './ledger.ts';
+import { createInterface } from 'node:readline';
+
+const AMOUNT_DESC =
+  'Decimal string, e.g. "1200.00". MUST be a string, never a JSON number — ' +
+  'JSON numbers are floats and lose precision before the server ever sees them.';
+
+const IDEM_DESC =
+  'Required. Derive it from the real-world event you are recording (invoice number, bank reference, ' +
+  'webhook id) so the same event always produces the same key. Replaying a key returns the original ' +
+  'result instead of posting twice. If you CHANGE any argument, use a NEW key.';
+
+const TOOLS = [
+  // ---- read ----------------------------------------------------------------
+  {
+    name: 'postledger_chart',
+    description:
+      'List the chart of accounts with current balances. CALL THIS FIRST before posting anything — ' +
+      'you may only post to accounts that already exist, and inventing an account name will be rejected.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_balance',
+    description: 'Balance of one account, or of a subtree by prefix (e.g. "Expenses" covers all expense accounts).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Exact account, e.g. "Assets:Bank:Checking"' },
+        prefix: { type: 'string', description: 'Subtree prefix instead, e.g. "Expenses"' },
+      },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_trial_balance',
+    description: 'Trial balance: every account plus total debits and credits. If these differ, the books are broken.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_balance_sheet',
+    description:
+      'Balance sheet: assets, liabilities, equity, and profit not yet closed into equity. ' +
+      'The accounting identity (assets = liabilities + equity + profit) is checked, not assumed — ' +
+      'if it fails the response says ok:false and reports the exact gap, which means the books are ' +
+      'damaged and you should report that rather than the numbers.',
+    inputSchema: {
+      type: 'object',
+      properties: { as_of: { type: 'string', description: 'YYYY-MM-DD; omit for right now' } },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_income_statement',
+    description:
+      'Income statement (profit and loss) for a period. Omit both dates for since-inception. ' +
+      'Income and expense balances are cumulative, so a bounded period is computed as the ' +
+      'difference between two snapshots.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        to: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+      },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_list_entries',
+    description: 'Recent journal entries, newest first. Filter by account or date.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string' },
+        since: { type: 'string', description: 'YYYY-MM-DD' },
+        limit: { type: 'integer', minimum: 1, maximum: 500, default: 50 },
+      },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_verify',
+    description:
+      'Integrity check: hash chain continuity, derived balances recomputed from the journal, and the ' +
+      'on-disk fingerprint of every archived document. Returns ok:false with the specific problem if anything fails.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_audit',
+    description:
+      'Statistical forensics: Benford first-digit distribution, round-number density, duplicate amounts, ' +
+      'clustering just below approval thresholds, outliers. ' +
+      'IMPORTANT: every result is an INDICATOR, not evidence. Deviation is not fraud and conformity is not ' +
+      'innocence. Use it to decide which entries deserve a look at the source document — never to conclude that ' +
+      'books are fraudulent. Say so when you report the results.',
+    inputSchema: {
+      type: 'object',
+      properties: { account: { type: 'string', description: 'Restrict to entries touching this account' } },
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
+    name: 'postledger_actors',
+    description:
+      'Who has written to this book, with entry counts. NOTE: actor is self-declared, not authenticated — ' +
+      'useful for tracing accidents, not for catching an adversary.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    readOnly: true,
+  },
+
+  // ---- write ----------------------------------------------------------------
+  {
+    name: 'postledger_open_account',
+    description:
+      'Create an account. Use a colon-separated path with no spaces: "Assets:Bank:Checking", "Expenses:Meals". ' +
+      'The first segment conventionally matches the type. Do this deliberately — do not open accounts on the fly ' +
+      'just because a posting failed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        account: { type: 'string', description: 'Colon:Separated:Path, no spaces' },
+        type: { type: 'string', enum: ['asset', 'liability', 'equity', 'income', 'expense'] },
+        allow_negative: { type: 'boolean', default: false,
+          description: 'Whether this account may go negative. A cash drawer should not; a customer-credit liability may.' },
+        note: { type: 'string' },
+      },
+      required: ['account', 'type'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_post_entry',
+    description:
+      'Post a balanced journal entry. This is the only way to write to the books.\n\n' +
+      'RULES:\n' +
+      '• Debits must equal credits. Leg amounts are always POSITIVE — express direction with side, not a minus sign.\n' +
+      '• expected_total is the debit-side total, computed independently by you. If it disagrees with the legs, ' +
+      'the entry is rejected. This gate exists to catch a missing or duplicated line before it reaches the books.\n' +
+      '• Post only what the source document actually says. Do NOT invent a counterparty, a date, or a line item. ' +
+      'If a field is unknown, ask — do not fill it in.\n' +
+      '• Accounts must already exist. If one does not, you will get suggestions back; pick from those or open ' +
+      'the account deliberately.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        idempotency_key: { type: 'string', description: IDEM_DESC },
+        date: { type: 'string', description: 'Business date, YYYY-MM-DD. Not "today", not "Aug 8".' },
+        description: { type: 'string', description: 'What actually happened, from the source document.' },
+        legs: {
+          type: 'array', minItems: 2,
+          description: 'At least one debit and one credit.',
+          items: {
+            type: 'object',
+            properties: {
+              account: { type: 'string' },
+              side: { type: 'string', enum: ['debit', 'credit'] },
+              amount: { type: 'string', description: AMOUNT_DESC },
+              memo: { type: 'string' },
+            },
+            required: ['account', 'side', 'amount'],
+            additionalProperties: false,
+          },
+        },
+        expected_total: { type: 'string', description: 'Debit-side total you computed yourself. ' + AMOUNT_DESC },
+        actor: { type: 'string', description: 'Who is posting, e.g. "agent:claude". Recorded as a CLAIM, not verified.' },
+        expect_balance_after: {
+          type: 'object',
+          description: 'Optional stronger assertion: what one account should total after this entry. ' +
+                       'Catches posting to the wrong account or the wrong side.',
+          properties: { account: { type: 'string' }, balance: { type: 'string', description: AMOUNT_DESC } },
+          required: ['account', 'balance'],
+          additionalProperties: false,
+        },
+      },
+      required: ['idempotency_key', 'date', 'description', 'legs', 'expected_total'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_reverse_entry',
+    description:
+      'Reverse an entry. This is the ONLY way to correct the books — entries are never edited or deleted. ' +
+      'The reversal is a new entry with the opposite legs, so both the mistake and the correction stay visible.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string' },
+        idempotency_key: { type: 'string', description: IDEM_DESC },
+        reason: { type: 'string', description: 'Why. This goes into the permanent record.' },
+        date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
+        actor: { type: 'string' },
+      },
+      required: ['entry_id', 'idempotency_key', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_revert_actor',
+    description:
+      'Reverse EVERY entry written by one actor — the recovery path for an agent that went wrong or a batch ' +
+      'posted to the wrong book. Reverses, never deletes: the books end up as if that actor never wrote, while ' +
+      'the full history of what happened stays intact.\n' +
+      'ALWAYS run with dry_run:true first and show the user what would change. Only apply after they confirm.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        actor: { type: 'string', description: 'Exact actor string, from postledger_actors' },
+        idempotency_key: { type: 'string', description: 'Batch key. Re-running with the same key safely resumes.' },
+        reason: { type: 'string' },
+        since: { type: 'string', description: 'YYYY-MM-DD, only entries on or after' },
+        until: { type: 'string', description: 'YYYY-MM-DD, only entries on or before' },
+        dry_run: { type: 'boolean', default: true, description: 'Preview what would be reversed. Do this first.' },
+      },
+      required: ['actor', 'reason'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'postledger_attach_document',
+    description:
+      'Archive a source document (invoice, receipt, contract, bank slip) and bind it to an entry. ' +
+      'Content-addressed by SHA-256: the same file is stored once and never overwritten. ' +
+      'postledger_verify later re-hashes the file on disk, so a swapped original is detectable.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string' },
+        file_path: { type: 'string', description: 'Absolute path to a file on this machine' },
+        kind: { type: 'string', enum: ['invoice', 'receipt', 'contract', 'statement', 'bank_slip', 'other'] },
+        idempotency_key: { type: 'string', description: IDEM_DESC },
+      },
+      required: ['entry_id', 'file_path', 'kind', 'idempotency_key'],
+      additionalProperties: false,
+    },
+  },
+] as const;
+
+type Handler = (L: Ledger, args: any) => unknown;
+
+const HANDLERS: Record<string, Handler> = {
+  postledger_chart: (L) => ({ ok: true, currency: L.currency.code, accounts: L.accounts() }),
+  postledger_balance: (L, a) => (a.prefix !== undefined ? L.balanceTree(a.prefix) : L.balance(a.account)),
+  postledger_trial_balance: (L) => L.trialBalance(),
+  postledger_balance_sheet: (L, a) => L.balanceSheet(a?.as_of),
+  postledger_income_statement: (L, a) => L.incomeStatement(a ?? {}),
+  postledger_list_entries: (L, a) => L.entries(a ?? {}),
+  postledger_verify: (L) => L.verify(),
+  postledger_audit: (L, a) => L.auditSignals(a ?? {}),
+  postledger_actors: (L) => L.actors(),
+
+  postledger_open_account: (L, a) =>
+    L.openAccount(a.account, a.type, { allowNegative: a.allow_negative, note: a.note }),
+
+  postledger_post_entry: (L, a) =>
+    L.post({
+      idempotencyKey: a.idempotency_key, date: a.date, description: a.description,
+      legs: a.legs, expectedTotal: a.expected_total, actor: a.actor,
+      expectBalanceAfter: a.expect_balance_after,
+    }),
+
+  postledger_reverse_entry: (L, a) =>
+    L.reverse(a.entry_id, { idempotencyKey: a.idempotency_key, reason: a.reason, date: a.date, actor: a.actor }),
+
+  postledger_revert_actor: (L, a) =>
+    L.revertActor(a.actor, {
+      // dry_run defaults to true: this operation has a big blast radius, so preview is mandatory by default
+      idempotencyKey: a.idempotency_key ?? '', reason: a.reason,
+      since: a.since, until: a.until, dryRun: a.dry_run !== false,
+    }),
+
+  postledger_attach_document: (L, a) =>
+    L.attach(a.entry_id, a.file_path, a.kind, { idempotencyKey: a.idempotency_key }),
+};
+
+// ---------------------------------------------------------------------------
+
+export async function runMcpServer(bookPath: string): Promise<void> {
+  const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + '\n');
+  const reply = (id: unknown, result: unknown) => send({ jsonrpc: '2.0', id, result });
+  const failRpc = (id: unknown, code: number, message: string) =>
+    send({ jsonrpc: '2.0', id, error: { code, message } });
+
+  // Tool-execution failures don't go through JSON-RPC error — they come back
+  // as a normal result with isError set, so the model gets a structured hint
+  // it can act on and retry, instead of an opaque RPC failure.
+  const toolError = (id: unknown, payload: unknown) =>
+    reply(id, { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true });
+
+  const rl = createInterface({ input: process.stdin, terminal: false });
+
+  for await (const line of rl) {
+    const raw = line.trim();
+    if (!raw) continue;
+
+    let msg: any;
+    try { msg = JSON.parse(raw); }
+    catch { failRpc(null, -32700, 'parse error'); continue; }
+
+    const { id, method, params } = msg;
+
+    try {
+      switch (method) {
+        case 'initialize':
+          reply(id, {
+            protocolVersion: params?.protocolVersion ?? '2025-06-18',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'postledger', version: '0.1.0' },
+            instructions:
+              'Double-entry bookkeeping with database-enforced invariants.\n\n' +
+              'Call postledger_chart before posting — accounts must already exist and inventing one is rejected.\n' +
+              'Every write needs an idempotency_key derived from the real-world event, so retries are safe.\n' +
+              'Amounts are always strings, never JSON numbers.\n' +
+              'Never invent a figure, a date, or a counterparty: post what the source document says, and ask ' +
+              'when something is unknown.\n' +
+              'Corrections are reversals, never edits.',
+          });
+          break;
+
+        case 'notifications/initialized':
+          break;                                  // Notifications get no reply
+
+        case 'tools/list':
+          reply(id, {
+            tools: TOOLS.map((t) => ({
+              name: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              annotations: {
+                readOnlyHint: !!(t as any).readOnly,
+                destructiveHint: t.name === 'postledger_revert_actor',
+                idempotentHint: !(t as any).readOnly,
+              },
+            })),
+          });
+          break;
+
+        case 'tools/call': {
+          const name = params?.name;
+          const handler = HANDLERS[name];
+          if (!handler) { failRpc(id, -32602, `unknown tool: ${name}`); break; }
+
+          // Open a fresh connection per call: SQLite connections are cheap, and this avoids a long-lived connection holding a lock
+          const L = Ledger.open(bookPath);
+          try {
+            const out = handler(L, params?.arguments ?? {});
+            reply(id, { content: [{ type: 'text', text: JSON.stringify(out, null, 2) }] });
+          } catch (e: any) {
+            if (e instanceof PostledgerError) toolError(id, e.toJSON());
+            else toolError(id, { ok: false, error_code: 'INTERNAL', error: String(e?.message ?? e),
+                                 hint: 'This is a bug in postledger, not in your call. Report it with the arguments you used.' });
+          } finally {
+            L.close();
+          }
+          break;
+        }
+
+        case 'ping':
+          reply(id, {});
+          break;
+
+        default:
+          if (id !== undefined) failRpc(id, -32601, `method not found: ${method}`);
+      }
+    } catch (e: any) {
+      if (id !== undefined) failRpc(id, -32603, String(e?.message ?? e));
+    }
+  }
+}

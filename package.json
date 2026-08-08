@@ -1,0 +1,65 @@
+{
+  "name": "postledger",
+  "version": "0.1.0",
+  "description": "Double-entry bookkeeping that assumes the bookkeeper is not trustworthy. Idempotent writes, append-only journal, DB-enforced balance, tamper-evident hash chain. Unix CLI + MCP server. Zero dependencies.",
+  "keywords": [
+    "double-entry",
+    "bookkeeping",
+    "accounting",
+    "ledger",
+    "general-ledger",
+    "idempotent",
+    "idempotency",
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "ai-agent",
+    "llm",
+    "claude",
+    "audit-trail",
+    "tamper-evident",
+    "append-only",
+    "benford",
+    "sqlite",
+    "plaintext-accounting",
+    "cli"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "postledger": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/ledger.ts",
+    "./money": "./src/money.ts",
+    "./audit": "./src/audit.ts"
+  },
+  "files": [
+    "src/",
+    "server.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "test": "node tests/invariants.mjs && node tests/money.mjs && node tests/engine.mjs && node tests/forensics.mjs && node tests/reports.mjs && node tests/e2e.mjs",
+    "test:invariants": "node tests/invariants.mjs",
+    "test:money": "node tests/money.mjs",
+    "test:engine": "node tests/engine.mjs",
+    "test:forensics": "node tests/forensics.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:reports": "node tests/reports.mjs"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/postledger.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/postledger/issues"
+  },
+  "homepage": "https://github.com/OWNER/postledger#readme",
+  "mcpName": "dev.postledger/postledger"
+}

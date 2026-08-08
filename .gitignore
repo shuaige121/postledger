@@ -1,0 +1,8 @@
+node_modules/
+*.db
+*.db-wal
+*.db-shm
+books/
+documents/
+anchors.log
+.github/workflows/
