@@ -204,6 +204,96 @@ console.log('\n\x1b[1mH. A book made by an older version opens and upgrades\x1b[
   again.close();
 }
 
+console.log('\n\x1b[1mI. Tax / FX audit columns and tags\x1b[0m');
+{
+  const L = book();
+  L.openAccount('Expenses:Meals', 'expense');
+  L.openAccount('Liabilities:VAT', 'liability');
+  sale(L, 'seed', '2026-08-01', '1000.00');
+
+  const r = L.post({
+    idempotencyKey: 'lunch', date: '2026-08-08', description: 'Team lunch in Amsterdam',
+    legs: [
+      { account: 'Expenses:Meals', side: 'debit', amount: '100.00',
+        taxCode: 'VAT21', taxAmount: '21.00', fxCurrency: 'EUR', fxAmount: '92.50' },
+      { account: 'Liabilities:VAT', side: 'debit', amount: '21.00', taxCode: 'VAT21' },
+      { account: 'Assets:Bank', side: 'credit', amount: '121.00' },
+    ],
+    expectedTotal: '121.00', tags: { project: 'apollo', client: 'acme' },
+  });
+  eq('I1 posted with tax, fx and tags', r.ok, true);
+  eq('I2 tax code echoed back', r.legs[0].tax_code, 'VAT21');
+  eq('I3 original currency preserved', r.legs[0].fx_currency, 'EUR');
+  eq('I4 original amount preserved exactly', r.legs[0].fx_amount, '92.50');
+  eq('I5 tags echoed back', r.tags.project, 'apollo');
+  eq('I6 verify passes with the new fields', L.verify({ documents: false }).ok, true);
+
+  // Entries without any of it must still verify — books written by older
+  // versions hashed a payload with none of these keys.
+  L.post({ idempotencyKey: 'plain', date: '2026-08-09', description: 'plain',
+    legs: [{ account: 'Expenses:Meals', side: 'debit', amount: '10.00' },
+           { account: 'Assets:Bank', side: 'credit', amount: '10.00' }], expectedTotal: '10.00' });
+  eq('I7 old-style and new-style entries coexist', L.verify({ documents: false }).ok, true);
+
+  rejects('I8 fx_amount without fx_currency is refused', 'BAD_AMOUNT', () => L.post({
+    idempotencyKey: 'bad-fx', date: '2026-08-10', description: 'x',
+    legs: [{ account: 'Expenses:Meals', side: 'debit', amount: '5.00', fxAmount: '4.50' },
+           { account: 'Assets:Bank', side: 'credit', amount: '5.00' }], expectedTotal: '5.00' }));
+  rejects('I9 an unknown fx currency is refused', 'BAD_AMOUNT', () => L.post({
+    idempotencyKey: 'bad-cur', date: '2026-08-10', description: 'x',
+    legs: [{ account: 'Expenses:Meals', side: 'debit', amount: '5.00', fxCurrency: 'XYZ', fxAmount: '4.50' },
+           { account: 'Assets:Bank', side: 'credit', amount: '5.00' }], expectedTotal: '5.00' }));
+
+  const path = L.path;
+  L.close();
+  // The tax code is part of the hashed payload, so altering it must break the chain.
+  const raw = new DatabaseSync(path);
+  raw.exec('DROP TRIGGER posting_no_update');
+  raw.exec("UPDATE postings SET tax_code='VAT9' WHERE tax_code='VAT21'");
+  raw.close();
+  const L2 = Ledger.open(path);
+  eq('I10 altering a tax code breaks the chain', L2.verify({ documents: false }).ok, false);
+  L2.close();
+}
+
+console.log('\n\x1b[1mJ. Finding entries again\x1b[0m');
+{
+  const L = book();
+  L.openAccount('Expenses:Meals', 'expense');
+  sale(L, 'seed', '2026-01-01', '5000.00');
+  for (let i = 1; i <= 6; i++) {
+    L.post({ idempotencyKey: `e${i}`, date: `2026-0${i}-15`, description: i % 2 ? 'coffee run' : 'team dinner',
+      legs: [{ account: 'Expenses:Meals', side: 'debit', amount: `${i * 10}.00` },
+             { account: 'Assets:Bank', side: 'credit', amount: `${i * 10}.00` }],
+      expectedTotal: `${i * 10}.00`, actor: i % 2 ? 'agent:a' : 'human:b',
+      tags: { project: i <= 3 ? 'apollo' : 'zeus' } });
+  }
+  eq('J1 filter by tag', L.entries({ tag: 'project', tagValue: 'apollo' }).count, 3);
+  eq('J2 filter by actor', L.entries({ actor: 'agent:a' }).count, 3);
+  eq('J3 filter by description', L.entries({ describes: 'coffee' }).count, 3);
+  eq('J4 filter by amount range', L.entries({ minAmount: '30.00', maxAmount: '50.00' }).count, 3);
+  eq('J5 filter by date range', L.entries({ since: '2026-03-01', until: '2026-04-30' }).count, 2);
+  eq('J6 account prefix covers descendants', L.entries({ account: 'Expenses' }).count, 6);
+
+  // Cursor paging must walk the whole history without repeating or skipping.
+  const seen = new Set();
+  let cursor, pages = 0;
+  for (;;) {
+    const page = L.entries({ limit: 3, beforeSeq: cursor });
+    page.entries.forEach((e) => seen.add(e.seq));
+    pages++;
+    if (page.next_before_seq === null) break;
+    cursor = page.next_before_seq;
+    if (pages > 10) break;
+  }
+  eq('J7 paging visits every entry exactly once', seen.size, 7);
+  eq('J8 and terminates', pages <= 4, true);
+
+  eq('J9 balance as of a past date', L.balance('Assets:Bank', { asOf: '2026-02-28' }).balance, '4970.00');
+  eq('J10 balance now', L.balance('Assets:Bank').balance, '4790.00');
+  L.close();
+}
+
 rmSync(dir, { recursive: true, force: true });
 console.log(`\n\x1b[1mResult: ${pass} passed, ${fail} failed\x1b[0m\n`);
 process.exit(fail === 0 ? 0 : 1);

@@ -13,7 +13,7 @@ so there is no float anywhere and no rounding tolerance to exploit. `postledger 
 chain, recomputes every balance from the journal, and re-hashes each archived source document.
 
 Three surfaces over the same file: a **Unix CLI**, an **MCP server** (19 tools), and a **local read-only
-web view** in your browser. 376 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
+web view** in your browser. 396 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
 no daemon, and no account.
 
 There is no hosted version and there will not be one. This project is *structurally incapable* of holding
@@ -106,7 +106,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 376 of them across seven
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 396 of them across seven
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -275,6 +275,49 @@ for. Nothing more.
 
 ---
 
+## A second axis, and what happened at the time
+
+```bash
+postledger post --key inv-88 --date 2026-08-08 --desc "Team lunch, Amsterdam" \
+  --leg "Expenses:Meals   debit  100.00" \
+  --leg "Liabilities:VAT  debit   21.00" \
+  --leg "Assets:Bank     credit  121.00" \
+  --expect-total 121.00
+```
+
+Two things a ledger can never recover after the fact, so both are recorded at write time:
+
+**Tax and original currency, pinned to the leg.** One expense account can carry legs at four different
+VAT rates, so the rate cannot be reconstructed from the account later — and postings are immutable, so a
+column added next year would be permanently blank for everything before it. `tax_code`, `tax_amount`,
+`fx_currency` and `fx_amount` are audit columns: they record what was true, they never compute. A tax
+engine can be built on top whenever one is needed; the facts it would need are being kept now.
+
+**Tags, orthogonal to the chart of accounts.** `{"project": "apollo", "client": "acme"}` instead of
+forking the tree into `Expenses:Meals:ProjectA`. Every mature system in this space has a second axis,
+because the chart alone cannot carry it.
+
+Both are covered by the entry hash — altering a tax code after the fact breaks the chain, and there is a
+test that does exactly that. The consequence is that **neither can be applied retroactively**. That is
+deliberate: a tag you can add later is a tag you can change later, and this ledger has no change
+operation.
+
+## Finding entries again
+
+An audit signal or an ageing bucket is only useful if you can pull up the entries behind it:
+
+```bash
+postledger entries --tag project --tag-value apollo --min 1000.00 --since 2026-01-01
+postledger entries --actor agent:rogue --describes refund
+postledger balance Assets:Bank --as-of 2026-07-31 --subtree
+```
+
+Paging is by cursor, not offset: each response carries `next_before_seq`, and `seq` is monotonic, so the
+window stays stable even while new entries are being written. `null` means the end — the whole history
+can be walked without guessing when to stop.
+
+---
+
 ## The check that looks outward
 
 The hash chain proves nobody altered what is written down. It cannot tell you something was never
@@ -400,7 +443,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 376 assertions
+npm test                       # 396 assertions
 node src/cli.ts --help
 ```
 
@@ -453,7 +496,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-376 assertions across seven suites: schema invariants, money arithmetic, the engine, forensics, reports
+396 assertions across seven suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License

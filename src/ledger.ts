@@ -65,6 +65,14 @@ export type Side = 'debit' | 'credit';
 export interface LegInput {
   account: string;
   side: Side;
+  /** Tax code as it applied AT THE TIME, e.g. "VAT21", "GST8", "exempt". Recorded, never computed with. */
+  taxCode?: string;
+  /** Tax portion of this leg, decimal string. A snapshot of a historical fact, not a rate lookup. */
+  taxAmount?: string;
+  /** Original currency, when this leg was converted from another. */
+  fxCurrency?: string;
+  /** Original amount in that currency, decimal string. */
+  fxAmount?: string;
   /** A decimal string. **JSON numbers are not accepted** — see money.ts for why. */
   amount: string;
   memo?: string;
@@ -78,6 +86,12 @@ export interface PostInput {
   /** The debit-side total, computed independently by the caller. If it doesn't match the sum of the legs, the whole entry is rejected. */
   expectedTotal: string;
   actor?: string;
+  /**
+   * Free-form labels, orthogonal to the chart of accounts: project, client,
+   * cost centre. Covered by the entry hash, which means they cannot be applied
+   * afterwards — a tag you can add later is a tag you can change later.
+   */
+  tags?: Record<string, string>;
   /** An optional stronger assertion: what a given account's balance should be after this entry posts */
   expectBalanceAfter?: { account: string; balance: string };
 }
@@ -91,6 +105,48 @@ const canonical = (v: unknown): string => {
   return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`;
 };
 const sha256 = (s: string | Buffer) => createHash('sha256').update(s).digest('hex');
+
+/**
+ * The exact bytes an entry's hash covers. Written once and used by BOTH the
+ * write path and `verify` — two copies of this would eventually differ by a
+ * field, and every hash in every book would silently stop matching.
+ *
+ * Optional fields are included **only when present**. That is what keeps books
+ * written by earlier versions verifiable: an entry recorded before tags or the
+ * tax columns existed hashed a payload without those keys, so omitting them
+ * when absent reproduces the original bytes exactly. Including a key
+ * unconditionally would invalidate every historical hash at once.
+ */
+export interface PayloadLeg {
+  account: string; side: string; amount: string; memo: string | null;
+  tax_code?: string | null; tax_amount?: string | null;
+  fx_currency?: string | null; fx_amount?: string | null;
+}
+
+function entryPayload(e: {
+  id: string; date: string; description: string; legs: PayloadLeg[];
+  declared_total: string; claimed_actor: string | null;
+  idempotency_key: string | null; created_at: string; seq: number;
+  tags?: Record<string, string> | null;
+}): string {
+  const leg = (l: PayloadLeg) => ({
+    account: l.account, side: l.side, amount: l.amount, memo: l.memo ?? null,
+    ...(l.tax_code    ? { tax_code:    l.tax_code }    : {}),
+    ...(l.tax_amount  ? { tax_amount:  l.tax_amount }  : {}),
+    ...(l.fx_currency ? { fx_currency: l.fx_currency } : {}),
+    ...(l.fx_amount   ? { fx_amount:   l.fx_amount }   : {}),
+  });
+  return canonical({
+    id: e.id, date: e.date, description: e.description,
+    legs: e.legs.map(leg),
+    declared_total: e.declared_total,
+    claimed_actor: e.claimed_actor,
+    idempotency_key: e.idempotency_key,
+    created_at: e.created_at, seq: e.seq,
+    ...(e.tags && Object.keys(e.tags).length ? { tags: e.tags } : {}),
+  });
+}
+
 const nowIso = () => new Date().toISOString();
 
 /** The day before an ISO date — used to take an opening snapshot for period reports. */
@@ -458,7 +514,37 @@ export class Ledger {
         throw err('BAD_SIDE', `leg ${i + 1} has side ${JSON.stringify(l.side)}`,
           'side must be exactly "debit" or "credit".');
       }
-      return { ...l, money: amount };
+      let taxMinor: bigint | undefined;
+      if (l.taxAmount !== undefined) {
+        try { taxMinor = Money.fromJson(l.taxAmount, this.currency).minor; }
+        catch (e: any) {
+          throw err('BAD_AMOUNT', `leg ${i + 1} tax_amount: ${e.message}`,
+            'Tax amounts follow the same rule as every other figure here: a decimal string.');
+        }
+      }
+      // Normalise the FX figure to minor units HERE, once. The hash payload and
+      // the row that gets written must be fed the same value — feeding one a
+      // decimal string and the other an integer is how a hash silently stops
+      // matching its own row. Sharing the payload function is not enough if the
+      // inputs differ.
+      let fxMinor: bigint | undefined;
+      if (l.fxCurrency !== undefined || l.fxAmount !== undefined) {
+        if (l.fxCurrency === undefined || l.fxAmount === undefined) {
+          throw err('BAD_AMOUNT', `leg ${i + 1}: fx_currency and fx_amount must be given together`,
+            'An original amount without its currency, or a currency without an amount, records nothing usable.');
+        }
+        let fxCur;
+        try { fxCur = currencyOf(l.fxCurrency); } catch {
+          throw err('BAD_AMOUNT', `leg ${i + 1} fx_currency ${JSON.stringify(l.fxCurrency)} is not a known currency code`,
+            'Use an ISO 4217 code such as "EUR". This records what the amount was converted FROM.');
+        }
+        try { fxMinor = Money.fromJson(l.fxAmount, fxCur).minor; }
+        catch (e: any) {
+          throw err('BAD_AMOUNT', `leg ${i + 1} fx_amount: ${e.message}`,
+            'Original amounts follow the same rule as every other figure: a decimal string.');
+        }
+      }
+      return { ...l, money: amount, taxMinor, fxMinor };
     });
 
     // Accounts must already exist. When one is wrong, offer candidates instead of making the model guess.
@@ -553,27 +639,37 @@ export class Ledger {
     const prevHash: string | null = prev ? prev.hash : null;
     const createdAt = nowIso();
 
-    const payload = canonical({
+    const payload = entryPayload({
       id, date: input.date, description: input.description,
-      legs: legs.map((l) => ({ account: l.account, side: l.side, amount: l.money.minor.toString(), memo: l.memo ?? null })),
+      legs: legs.map((l) => ({
+        account: l.account, side: l.side, amount: l.money.minor.toString(), memo: l.memo ?? null,
+        tax_code: l.taxCode ?? null,
+        tax_amount: l.taxMinor !== undefined ? l.taxMinor.toString() : null,
+        fx_currency: l.fxCurrency ?? null,
+        fx_amount: l.fxMinor !== undefined ? l.fxMinor.toString() : null,
+      })),
       declared_total: debits.minor.toString(),
       claimed_actor: input.actor ?? null,
       idempotency_key: input.idempotencyKey,
       created_at: createdAt, seq,
+      tags: input.tags ?? null,
     });
     const hash = sha256((prevHash ?? '') + payload);
 
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const insLeg = this.db.prepare(
-        'INSERT INTO postings (entry_id,seq,account_id,side,amount,memo) VALUES (?,?,?,?,?,?)');
-      legs.forEach((l, i) => insLeg.run(id, i + 1, l.account, l.side, l.money.minor, l.memo ?? null));
+        `INSERT INTO postings (entry_id,seq,account_id,side,amount,memo,tax_code,tax_amount,fx_currency,fx_amount)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`);
+      legs.forEach((l, i) => insLeg.run(id, i + 1, l.account, l.side, l.money.minor, l.memo ?? null,
+        l.taxCode ?? null, l.taxMinor ?? null, l.fxCurrency ?? null, l.fxMinor ?? null));
 
       this.db.prepare(`INSERT INTO entries
         (id,date,description,declared_total,declared_legs,claimed_actor,idempotency_key,
-         created_at,prev_hash,hash,seq) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+         created_at,prev_hash,hash,seq,tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, input.date, input.description, debits.minor, BigInt(legs.length),
-             input.actor ?? null, input.idempotencyKey, createdAt, prevHash, hash, BigInt(seq));
+             input.actor ?? null, input.idempotencyKey, createdAt, prevHash, hash, BigInt(seq),
+             input.tags && Object.keys(input.tags).length ? canonical(input.tags) : null);
 
       this.db.prepare('INSERT INTO chain_head (seq,hash,recorded_at) VALUES (?,?,?)')
         .run(BigInt(seq), hash, createdAt);
@@ -599,7 +695,12 @@ export class Ledger {
       ok: true as const,
       entry_id: id, seq, date: input.date, description: input.description,
       total: debits.format(), currency: this.currency.code,
-      legs: legs.map((l) => ({ account: l.account, side: l.side, amount: l.money.format() })),
+      legs: legs.map((l) => ({ account: l.account, side: l.side, amount: l.money.format(),
+        ...(l.taxCode ? { tax_code: l.taxCode } : {}),
+        ...(l.taxMinor !== undefined ? { tax_amount: Money.ofMinor(l.taxMinor, this.currency).format() } : {}),
+        ...(l.fxCurrency && l.fxMinor !== undefined
+            ? { fx_currency: l.fxCurrency, fx_amount: Money.ofMinor(l.fxMinor, currencyOf(l.fxCurrency)).format() } : {}) })),
+      ...(input.tags && Object.keys(input.tags).length ? { tags: input.tags } : {}),
       // The chain head is returned on every write. In the MCP setting it
       // automatically ends up in the conversation transcript — an external
       // witness the operator cannot themselves edit.
@@ -812,8 +913,19 @@ export class Ledger {
     return Money.ofMinor(BigInt(row.balance), this.currency);
   }
 
-  balance(account: string) {
-    return { ok: true as const, account, balance: this.balanceOf(account).format(), currency: this.currency.code };
+  balance(account: string, opts: { asOf?: string; subtree?: boolean } = {}) {
+    if (!opts.asOf && !opts.subtree) {
+      return { ok: true as const, account, balance: this.balanceOf(account).format(), currency: this.currency.code };
+    }
+    if (!this.db.prepare('SELECT 1 FROM accounts WHERE id = ?').get(account)) {
+      throw err('UNKNOWN_ACCOUNT', `account ${JSON.stringify(account)} does not exist`,
+        'Use postledger_chart to see the available accounts.',
+        { did_you_mean: this.suggestAccounts(account) });
+    }
+    const asOf = opts.asOf ?? nowIso().slice(0, 10);
+    const bal = this.balanceUpTo(account, asOf, opts.subtree ?? false);
+    return { ok: true as const, account, balance: Money.ofMinor(bal, this.currency).format(),
+             as_of: asOf, subtree: opts.subtree ?? false, currency: this.currency.code };
   }
 
   /** Roll up by prefix, e.g. prefix="Expenses" gets every expense account */
@@ -978,12 +1090,51 @@ export class Ledger {
     };
   }
 
-  entries(opts: { limit?: number; account?: string; since?: string } = {}) {
+  entries(opts: {
+    limit?: number; account?: string; since?: string; until?: string;
+    tag?: string; tagValue?: string; describes?: string; actor?: string;
+    minAmount?: string; maxAmount?: string; taxCode?: string;
+    beforeSeq?: number;
+  } = {}) {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
     const where: string[] = [];
     const args: any[] = [];
-    if (opts.account) { where.push('EXISTS (SELECT 1 FROM postings p WHERE p.entry_id=e.id AND p.account_id=?)'); args.push(opts.account); }
-    if (opts.since)   { where.push('e.date >= ?'); args.push(opts.since); }
+    if (opts.account) {
+      // Prefix match, so asking for "Expenses" covers every expense account.
+      where.push(`EXISTS (SELECT 1 FROM postings p WHERE p.entry_id = e.id
+                    AND (p.account_id = ? OR p.account_id LIKE ?))`);
+      args.push(opts.account, opts.account + ':%');
+    }
+    if (opts.since) { where.push('e.date >= ?'); args.push(opts.since); }
+    if (opts.until) { where.push('e.date <= ?'); args.push(opts.until); }
+    if (opts.actor) { where.push('e.claimed_actor = ?'); args.push(opts.actor); }
+    if (opts.describes) {
+      where.push("e.description LIKE '%' || ? || '%' ESCAPE '\\'");
+      args.push(opts.describes.replace(/[%_\\]/g, (c) => '\\' + c));
+    }
+    if (opts.tag) {
+      // Tags are canonical JSON on the entry, so a substring match on the
+      // serialised key (and optionally the value) is exact enough and needs
+      // no extra table.
+      if (opts.tagValue !== undefined) {
+        where.push('e.tags LIKE ?');
+        args.push('%' + JSON.stringify(opts.tag) + ':' + JSON.stringify(opts.tagValue) + '%');
+      } else {
+        where.push('e.tags LIKE ?');
+        args.push('%' + JSON.stringify(opts.tag) + ':%');
+      }
+    }
+    if (opts.taxCode) {
+      where.push('EXISTS (SELECT 1 FROM postings p WHERE p.entry_id = e.id AND p.tax_code = ?)');
+      args.push(opts.taxCode);
+    }
+    if (opts.minAmount) { where.push('e.declared_total >= ?'); args.push(Money.fromJson(opts.minAmount, this.currency).minor); }
+    if (opts.maxAmount) { where.push('e.declared_total <= ?'); args.push(Money.fromJson(opts.maxAmount, this.currency).minor); }
+    // Cursor paging. seq is monotonic, so "everything before N" is a stable
+    // window even while new entries are being written — an offset would shift
+    // under you.
+    if (opts.beforeSeq !== undefined) { where.push('e.seq < ?'); args.push(BigInt(opts.beforeSeq)); }
+
     const sql = `SELECT * FROM entries e ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
                  ORDER BY e.seq DESC LIMIT ?`;
     const rows = this.db.prepare(sql).all(...args, limit) as any[];
@@ -991,13 +1142,22 @@ export class Ledger {
     return {
       ok: true as const,
       count: rows.length,
+      // Cursor for the next page: pass it back as before_seq. Null means this
+      // was the last page, so a caller can walk the whole history without
+      // guessing when to stop.
+      next_before_seq: rows.length === limit ? Number(rows[rows.length - 1]!.seq) : null,
       entries: rows.map((r) => ({
         entry_id: r.id, seq: Number(r.seq), date: r.date, description: r.description,
         total: Money.ofMinor(BigInt(r.declared_total), this.currency).format(),
         claimed_actor: r.claimed_actor,
+        ...(r.tags ? { tags: JSON.parse(r.tags) } : {}),
         legs: (legStmt.all(r.id) as any[]).map((p) => ({
           account: p.account_id, side: p.side,
           amount: Money.ofMinor(BigInt(p.amount), this.currency).format(),
+          ...(p.tax_code ? { tax_code: p.tax_code } : {}),
+          ...(p.tax_amount != null ? { tax_amount: Money.ofMinor(BigInt(p.tax_amount), this.currency).format() } : {}),
+          ...(p.fx_currency ? { fx_currency: p.fx_currency,
+                fx_amount: Money.ofMinor(BigInt(p.fx_amount), currencyOf(p.fx_currency)).format() } : {}),
         })),
       })),
     };
@@ -1027,12 +1187,19 @@ export class Ledger {
           break;
         }
         const legs = (this.db.prepare('SELECT * FROM postings WHERE entry_id=? ORDER BY seq').all(r.id) as any[])
-          .map((p) => ({ account: p.account_id, side: p.side, amount: BigInt(p.amount).toString(), memo: p.memo ?? null }));
-        const expect = sha256(prev + canonical({
+          .map((p) => ({
+            account: p.account_id, side: p.side, amount: BigInt(p.amount).toString(), memo: p.memo ?? null,
+            tax_code: p.tax_code ?? null,
+            tax_amount: p.tax_amount !== null && p.tax_amount !== undefined ? BigInt(p.tax_amount).toString() : null,
+            fx_currency: p.fx_currency ?? null,
+            fx_amount: p.fx_amount !== null && p.fx_amount !== undefined ? BigInt(p.fx_amount).toString() : null,
+          }));
+        const expect = sha256(prev + entryPayload({
           id: r.id, date: r.date, description: r.description, legs,
           declared_total: BigInt(r.declared_total).toString(),
           claimed_actor: r.claimed_actor, idempotency_key: r.idempotency_key,
           created_at: r.created_at, seq: Number(r.seq),
+          tags: r.tags ? JSON.parse(r.tags) : null,
         }));
         if (expect !== r.hash) {
           problems.push({ check: 'chain', problem: 'hash does not match the entry contents (tampered or re-written)', where: { seq: Number(r.seq), entry_id: r.id } });

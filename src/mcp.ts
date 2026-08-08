@@ -52,6 +52,8 @@ const TOOLS = [
       properties: {
         account: { type: 'string', description: 'Exact account, e.g. "Assets:Bank:Checking"' },
         prefix: { type: 'string', description: 'Subtree prefix instead, e.g. "Expenses"' },
+        as_of: { type: 'string', description: 'YYYY-MM-DD — the balance at the END of that date. Omit for now.' },
+        subtree: { type: 'boolean', description: 'Include sub-accounts beneath this one' },
       },
       additionalProperties: false,
     },
@@ -95,12 +97,25 @@ const TOOLS = [
   },
   {
     name: 'postledger_list_entries',
-    description: 'Recent journal entries, newest first. Filter by account or date.',
+    description:
+      'Journal entries, newest first, with filters. This is how you pull up the specific entries ' +
+      'something else pointed at — an audit signal, an ageing bucket, a stale assertion.\n' +
+      'Paging: the response carries next_before_seq; pass it back as before_seq for the next page. ' +
+      'Null means you reached the end, so the whole history can be walked without guessing.',
     inputSchema: {
       type: 'object',
       properties: {
-        account: { type: 'string' },
-        since: { type: 'string', description: 'YYYY-MM-DD' },
+        account: { type: 'string', description: 'Exact account or a prefix — "Expenses" covers every expense account' },
+        since: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        until: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        actor: { type: 'string', description: 'Only entries claiming this author' },
+        describes: { type: 'string', description: 'Substring of the description' },
+        tag: { type: 'string', description: 'Entries carrying this tag key' },
+        tag_value: { type: 'string', description: 'Narrow the tag to this exact value' },
+        tax_code: { type: 'string', description: 'Entries with a leg carrying this tax code' },
+        min_amount: { type: 'string', description: 'Minimum entry total. ' + AMOUNT_DESC },
+        max_amount: { type: 'string', description: 'Maximum entry total. ' + AMOUNT_DESC },
+        before_seq: { type: 'integer', description: 'Paging cursor from a previous response' },
         limit: { type: 'integer', minimum: 1, maximum: 500, default: 50 },
       },
       additionalProperties: false,
@@ -276,12 +291,24 @@ const TOOLS = [
               side: { type: 'string', enum: ['debit', 'credit'] },
               amount: { type: 'string', description: AMOUNT_DESC },
               memo: { type: 'string' },
+              tax_code: { type: 'string',
+                description: 'The tax code that applied AT THE TIME, e.g. "VAT21". Recorded, never computed with. ' +
+                  'Pin it now — one expense account can carry legs at several rates, so it cannot be ' +
+                  'reconstructed later, and postings are immutable.' },
+              tax_amount: { type: 'string', description: 'Tax portion of this leg. ' + AMOUNT_DESC },
+              fx_currency: { type: 'string', description: 'Currency this amount was converted FROM, e.g. "EUR". Give with fx_amount.' },
+              fx_amount: { type: 'string', description: 'The original amount in that currency. ' + AMOUNT_DESC },
             },
             required: ['account', 'side', 'amount'],
             additionalProperties: false,
           },
         },
         expected_total: { type: 'string', description: 'Debit-side total you computed yourself. ' + AMOUNT_DESC },
+        tags: { type: 'object', additionalProperties: { type: 'string' },
+          description: 'Labels orthogonal to the chart of accounts: {"project":"apollo","client":"acme"}. ' +
+            'Use these instead of forking the account tree into Expenses:Meals:ProjectA. ' +
+            'They are covered by the entry hash, so they CANNOT be added or changed afterwards — ' +
+            'set them now or never.' },
         actor: { type: 'string', description: 'Who is posting, e.g. "agent:claude". Recorded as a CLAIM, not verified.' },
         expect_balance_after: {
           type: 'object',
@@ -359,11 +386,18 @@ type Handler = (L: Ledger, args: any) => unknown;
 
 const HANDLERS: Record<string, Handler> = {
   postledger_chart: (L) => ({ ok: true, currency: L.currency.code, accounts: L.accounts() }),
-  postledger_balance: (L, a) => (a.prefix !== undefined ? L.balanceTree(a.prefix) : L.balance(a.account)),
+  postledger_balance: (L, a) => (a.prefix !== undefined
+    ? L.balanceTree(a.prefix)
+    : L.balance(a.account, { asOf: a.as_of, subtree: a.subtree })),
   postledger_trial_balance: (L) => L.trialBalance(),
   postledger_balance_sheet: (L, a) => L.balanceSheet(a?.as_of),
   postledger_income_statement: (L, a) => L.incomeStatement(a ?? {}),
-  postledger_list_entries: (L, a) => L.entries(a ?? {}),
+  postledger_list_entries: (L, a) => L.entries({
+    account: a?.account, since: a?.since, until: a?.until, actor: a?.actor,
+    describes: a?.describes, tag: a?.tag, tagValue: a?.tag_value, taxCode: a?.tax_code,
+    minAmount: a?.min_amount, maxAmount: a?.max_amount,
+    beforeSeq: a?.before_seq, limit: a?.limit,
+  }),
   postledger_verify: (L) => L.verify(),
   postledger_audit: (L, a) => L.auditSignals(a ?? {}),
   postledger_actors: (L) => L.actors(),
@@ -380,7 +414,12 @@ const HANDLERS: Record<string, Handler> = {
   postledger_post_entry: (L, a) =>
     L.post({
       idempotencyKey: a.idempotency_key, date: a.date, description: a.description,
-      legs: a.legs, expectedTotal: a.expected_total, actor: a.actor,
+      legs: (a.legs ?? []).map((l: any) => ({
+        account: l.account, side: l.side, amount: l.amount, memo: l.memo,
+        taxCode: l.tax_code, taxAmount: l.tax_amount,
+        fxCurrency: l.fx_currency, fxAmount: l.fx_amount,
+      })),
+      expectedTotal: a.expected_total, actor: a.actor, tags: a.tags,
       expectBalanceAfter: a.expect_balance_after,
     }),
 

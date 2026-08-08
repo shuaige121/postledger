@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.shuaige121/postledger",
   "description": "Idempotent, append-only double-entry ledger with a hash-chained audit trail. SQLite, CLI + MCP.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "repository": {
     "url": "https://github.com/shuaige121/postledger",
     "source": "github"

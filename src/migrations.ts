@@ -24,7 +24,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 interface Migration {
   version: number;
@@ -79,6 +79,47 @@ BEGIN SELECT RAISE(ABORT, 'postledger: assertions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS assertion_no_delete
 BEFORE DELETE ON assertions
 BEGIN SELECT RAISE(ABORT, 'postledger: assertions are append-only'); END;
+`,
+  },
+  {
+    version: 3,
+    description: 'tax/fx audit columns on postings, and entry-level tags',
+    sql: `
+-- Four nullable audit columns on postings.
+--
+-- Added now, while books are young, because this is a one-way door. Postings
+-- are immutable, so a column added later can never be filled in for anything
+-- already recorded — the history would be permanently blank. And the facts
+-- these hold cannot be reconstructed after the fact: one expense account can
+-- carry legs at four different VAT rates, so the rate has to be pinned to the
+-- leg at the moment it is written or it is gone.
+--
+-- They are audit columns, not a tax engine. Nothing computes with them; they
+-- record what was true when the entry was made, which is the part that cannot
+-- be recovered later. A tax engine can be built on top whenever it is needed.
+--
+-- Snapshot, never reference: the rate goes in as a number, not as a pointer to
+-- a rate table. A voucher's tax rate is a historical fact and must not drift
+-- when someone edits master data next year.
+ALTER TABLE postings ADD COLUMN tax_code   TEXT;
+ALTER TABLE postings ADD COLUMN tax_amount INTEGER;
+ALTER TABLE postings ADD COLUMN fx_currency TEXT;
+ALTER TABLE postings ADD COLUMN fx_amount   INTEGER;
+
+-- Entry-level tags: the second axis, orthogonal to the chart of accounts.
+--
+-- Without it the only way to say "this belongs to project X" is to fork the
+-- account tree — Expenses:Meals:ProjectA, Expenses:Meals:ProjectB — and the
+-- chart explodes. Every mature system in this space has a second axis for
+-- exactly this reason.
+--
+-- Stored on the entry and covered by its hash, which means tags cannot be
+-- applied after the fact. That is a real limitation and it is deliberate: a
+-- tag that can be added later is a tag that can be changed later, and this
+-- ledger does not have a "change" operation.
+ALTER TABLE entries ADD COLUMN tags TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_postings_tax ON postings (tax_code) WHERE tax_code IS NOT NULL;
 `,
   },
 ];

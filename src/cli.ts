@@ -153,12 +153,14 @@ POSTING
   revert-actor <actor> --key <k> --reason <text> [--since <d>] [--dry-run]
 
 READING
-  balance <account>                           one account
+  balance <account> [--as-of <d>] [--subtree]  one account, optionally at a date
   balances [prefix]                           subtree totals
   trial-balance                               the books must balance
   balance-sheet [--as-of <d>]                 assets = liabilities + equity + profit
   income-statement [--from <d>] [--to <d>]    income - expenses for a period
-  entries [--account <a>] [--since <d>] [--limit <n>]
+  entries [--account <a>] [--since <d>] [--until <d>] [--actor <who>]
+          [--tag <k>] [--tag-value <v>] [--tax-code <c>] [--describes <text>]
+          [--min <amt>] [--max <amt>] [--before-seq <n>] [--limit <n>]
   actors                                      who has written to this book
   ageing <account> [--as-of <d>]              how old is the money in one account
   allocate <amount> <ratio> [ratio...]        split an amount, losing no cent
@@ -282,7 +284,9 @@ async function main() {
         }), a);
         break;
 
-      case 'balance':       emit(L.balance(a._[1]!), a); break;
+      case 'balance':
+        emit(L.balance(a._[1]!, { asOf: a.flags['as-of'] as string, subtree: !!a.flags.subtree }), a);
+        break;
       case 'balances':      emit(L.balanceTree(a._[1] ?? ''), a); break;
       case 'trial-balance': {
         const tb = L.trialBalance();
@@ -335,8 +339,16 @@ async function main() {
       }
 
       case 'entries':
-        emit(L.entries({ limit: a.flags.limit ? Number(a.flags.limit) : undefined,
-          account: a.flags.account as string, since: a.flags.since as string }), a);
+        emit(L.entries({
+          limit: a.flags.limit ? Number(a.flags.limit) : undefined,
+          account: a.flags.account as string, since: a.flags.since as string,
+          until: a.flags.until as string, actor: a.flags.actor as string,
+          describes: a.flags.describes as string,
+          tag: a.flags.tag as string, tagValue: a.flags['tag-value'] as string,
+          taxCode: a.flags['tax-code'] as string,
+          minAmount: a.flags.min as string, maxAmount: a.flags.max as string,
+          beforeSeq: a.flags['before-seq'] ? Number(a.flags['before-seq']) : undefined,
+        }), a);
         break;
       case 'actors':        emit(L.actors(), a); break;
       case 'assert': {
