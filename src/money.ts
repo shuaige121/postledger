@@ -207,6 +207,42 @@ export class Money {
     return out.map((minor) => new Money(minor, this.currency));
   }
 
+  /**
+   * Convert to another currency at a stated rate, exactly.
+   *
+   * The rate is given as a decimal string and handled as a fraction, so there
+   * is no float anywhere: "1.0811" becomes 10811/10000 and the arithmetic is
+   * integer throughout, rounded half-up once at the end. Doing this with
+   * JavaScript numbers is how a converted amount ends up a cent away from what
+   * the bank charged, and a ledger that is a cent out does not balance.
+   *
+   * Exposed because multiplication is the other piece of arithmetic a model
+   * gets quietly wrong, alongside division.
+   */
+  convert(rate: string, to: Currency): Money {
+    const m = /^(\d+)(?:\.(\d+))?$/.exec(String(rate).trim());
+    if (!m) {
+      throw new InvalidAmountError(
+        `unusable exchange rate ${JSON.stringify(rate)}; give it as a positive decimal like "1.0811"`);
+    }
+    const [, whole, frac = ''] = m;
+    const numerator = BigInt(whole! + frac);
+    const denominator = 10n ** BigInt(frac.length);
+    if (numerator === 0n) throw new InvalidAmountError('an exchange rate of zero converts everything to nothing');
+
+    // Scale between the two currencies' minor units, then apply the rate.
+    // Everything stays integer; one half-up rounding at the very end.
+    const scaleUp = 10n ** BigInt(Math.max(0, to.decimals - this.currency.decimals));
+    const scaleDown = 10n ** BigInt(Math.max(0, this.currency.decimals - to.decimals));
+    const num = this.minor * numerator * scaleUp;
+    const den = denominator * scaleDown;
+    const neg = num < 0n;
+    const abs = neg ? -num : num;
+    const q = abs / den;
+    const rounded = abs % den * 2n >= den ? q + 1n : q;
+    return new Money(neg ? -rounded : rounded, to);
+  }
+
   /** "125.50" / "-3.07" / "1200" (JPY) — for display and reporting */
   format(): string {
     const neg = this.minor < 0n;

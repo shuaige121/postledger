@@ -1,6 +1,6 @@
 {
   "name": "postledger",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Double-entry bookkeeping that assumes the bookkeeper is not trustworthy. Idempotent writes, append-only journal, DB-enforced balance, tamper-evident hash chain. Unix CLI + MCP server. Zero dependencies.",
   "keywords": [
     "double-entry",

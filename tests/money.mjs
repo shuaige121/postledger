@@ -87,6 +87,22 @@ console.log('\n\x1b[1mE. Allocation loses not a single cent (largest-remainder m
      negative.reduce((s, m) => s.add(m), Money.zero(SGD)).format(), '-100.00');
 }
 
+console.log('\n\x1b[1mE2. Exact conversion\x1b[0m');
+{
+  const EUR = currencyOf('EUR'), JPY = currencyOf('JPY');
+  eq('E2a 92.50 EUR at 1.0811', Money.parse('92.50', EUR).convert('1.0811', SGD).format(), '100.00');
+  eq('E2b into a zero-decimal currency', Money.parse('1000.00', EUR).convert('163.42', JPY).format(), '163420');
+  eq('E2c out of a zero-decimal currency', Money.parse('100', JPY).convert('0.0064', SGD).format(), '0.64');
+  // 0.29 * 1.15 is 0.3335 exactly; JS floats give 0.33350000000000005
+  eq('E2d exact where floats are not', Money.parse('0.29', EUR).convert('1.15', SGD).format(), '0.33');
+  eq('E2e a rate of 1 is identity', Money.parse('12.34', EUR).convert('1', SGD).format(), '12.34');
+  eq('E2f zero converts to zero', Money.zero(EUR).convert('1.0811', SGD).format(), '0.00');
+  eq('E2g negatives convert too', Money.parse('-50.00', EUR).convert('1.10', SGD).format(), '-55.00');
+  rejects('E2h a zero rate is refused', () => Money.parse('1.00', EUR).convert('0', SGD));
+  rejects('E2i a negative rate is refused', () => Money.parse('1.00', EUR).convert('-1.1', SGD));
+  rejects('E2j a non-numeric rate is refused', () => Money.parse('1.00', EUR).convert('abc', SGD));
+}
+
 console.log('\n\x1b[1mF. Mixing currencies must throw\x1b[0m');
 rejects('F1 SGD + USD', () => Money.parse('1.00', SGD).add(Money.parse('1.00', USD)));
 rejects('F2 unknown currency XYZ', () => currencyOf('XYZ'));

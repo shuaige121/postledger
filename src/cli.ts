@@ -167,6 +167,7 @@ READING
   actors                                      who has written to this book
   ageing <account> [--as-of <d>]              how old is the money in one account
   allocate <amount> <ratio> [ratio...]        split an amount, losing no cent
+  convert <amount> <from> --rate <r>          convert exactly, no floating point
   by-actor <actor>                            what one actor wrote
 
 INTEROP
@@ -402,6 +403,9 @@ async function main() {
         break;
       }
       case 'ageing':        emit(L.ageing(a._[1]!, { asOf: a.flags['as-of'] as string }), a); break;
+      case 'convert':
+        emit(L.convert(a._[1]!, a._[2]!, String(a.flags.rate ?? ''), { to: a.flags.to as string }), a);
+        break;
       case 'allocate':
         emit(L.allocate(a._[1]!, a._.slice(2).map(Number)), a);
         break;

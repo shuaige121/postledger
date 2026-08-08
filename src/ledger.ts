@@ -1417,6 +1417,34 @@ export class Ledger {
   }
 
   /**
+   * Convert an amount at a stated rate, exactly.
+   *
+   * For a book kept in one currency, a foreign transaction is recorded at the
+   * rate that applied on the day, with the original amount kept alongside as
+   * an audit column. That is all "multi-currency" means at the point of entry:
+   * one conversion. What is genuinely hard — exchange gain or loss when a
+   * receivable settles at a different rate, and period-end revaluation — is
+   * about rate *movement*, not conversion, and is deliberately out of scope.
+   *
+   * The rate is handled as a fraction, never a float, so the result is exact.
+   */
+  convert(amount: string, from: string, rate: string, opts: { to?: string } = {}) {
+    const src = currencyOf(from);
+    const dst = opts.to ? currencyOf(opts.to) : this.currency;
+    const original = Money.fromJson(amount, src);
+    const converted = original.convert(rate, dst);
+    return {
+      ok: true as const,
+      original: original.format(), from: src.code,
+      converted: converted.format(), to: dst.code,
+      rate,
+      note: `Record the converted figure as the leg amount, and pass fx_currency="${src.code}" ` +
+            `and fx_amount="${original.format()}" so the original survives. Rounded half-up once, ` +
+            'at the end — no floating point was involved.',
+    };
+  }
+
+  /**
    * Split an amount by ratios without losing a minor unit.
    *
    * Exposed as a tool because division is exactly the arithmetic a language

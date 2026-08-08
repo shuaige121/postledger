@@ -178,6 +178,30 @@ const TOOLS = [
     readOnly: true,
   },
   {
+    name: 'postledger_convert',
+    description:
+      'Convert a foreign amount at a stated rate, exactly. Use this instead of multiplying yourself — ' +
+      'the rate is handled as a fraction rather than a float, so the result cannot be a cent off, and a ' +
+      'cent off is an entry the ledger will refuse.\n\n' +
+      'Then post the CONVERTED figure as the leg amount and pass fx_currency / fx_amount so the original ' +
+      'survives on the leg. That is what multi-currency means for a book kept in one currency.\n\n' +
+      'This does not handle exchange gain or loss (a receivable settling at a different rate) or ' +
+      'period-end revaluation. Those are about rate movement, not conversion — post them as ordinary ' +
+      'entries against an FX gain/loss account.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'string', description: 'The foreign amount. ' + AMOUNT_DESC },
+        from: { type: 'string', description: 'Its currency, e.g. "EUR"' },
+        rate: { type: 'string', description: 'Units of the book currency per unit of `from`, e.g. "1.0811". A decimal string.' },
+        to: { type: 'string', description: 'Target currency; defaults to the book currency' },
+      },
+      required: ['amount', 'from', 'rate'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+  },
+  {
     name: 'postledger_allocate',
     description:
       'Split an amount by integer ratios so the parts sum EXACTLY to the original — no cent lost, ' +
@@ -501,6 +525,7 @@ const HANDLERS: Record<string, Handler> = {
   postledger_stale_assertions: (L, a) => L.staleAssertions({ withinDays: a?.days }),
   postledger_ageing: (L, a) => L.ageing(a.account, { asOf: a.as_of }),
   postledger_allocate: (L, a) => L.allocate(a.amount, a.ratios),
+  postledger_convert: (L, a) => L.convert(a.amount, a.from, a.rate, { to: a.to }),
 
   postledger_open_account: (L, a) =>
     L.openAccount(a.account, a.type, { allowNegative: a.allow_negative, note: a.note }),

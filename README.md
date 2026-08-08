@@ -2,30 +2,47 @@
 
 **Double-entry bookkeeping that assumes the bookkeeper is not trustworthy.**
 
-Postledger is an idempotent, append-only double-entry ledger with a Unix CLI and an MCP server over
-one SQLite file. It exists because AI agents retry: when a tool call times out and the model posts the
-same journal entry again, most ledgers cheerfully create a duplicate. Postledger cannot — every write
-carries an idempotency key, and replaying that key returns the original entry and posts nothing.
+A ledger built for one situation: an AI agent is doing the writing. That premise decides everything
+here, and it comes down to three things.
 
-Balance is enforced by SQLite triggers, not by application code. Entries and postings have no UPDATE
-and no DELETE path at all; a mistake is corrected with a reversing entry. Money is `bigint` minor units,
-so there is no float anywhere and no rounding tolerance to exploit. `postledger verify` walks the hash
-chain, recomputes every balance from the journal, and re-hashes each archived source document.
+**Idempotent.** An agent retries — after a timeout, a resumed session, a compacted context. The network
+drops the *response*, not the *write*, and from the caller's side those are indistinguishable. Every
+write carries a key derived from the real-world event, so replaying it returns the original entry and
+posts nothing.
 
-Three surfaces over the same file: a **Unix CLI**, an **MCP server** (24 tools), and a **local read-only
-web view** in your browser. 456 tests. Zero runtime dependencies. Runs on Node 22.13+, needs no server,
-no daemon, and no account.
+**Auditable.** Nothing is ever edited or deleted; corrections are reversing entries. A hash chain covers
+every entry and its postings. Balance assertions record what you confirmed against a bank statement, and
+`verify` re-checks all of it — because the chain proves nobody *altered* the books, and only an
+assertion catches something that was never *written down*.
 
-There is no hosted version and there will not be one. This project is *structurally incapable* of holding
-your data — a book is a SQLite file on your disk — and therefore structurally incapable of leaking it,
-selling it, or walking away with it. That is not a promise about our intentions; it is a property of
-where the file lives.
+**MCP-native.** 25 tools shaped so a model has little room to get it wrong: amounts are strings (a JSON
+number is already an imprecise float), unknown accounts come back with suggestions, an unbalanced entry
+is diagnosed by the classic bookkeeper's checks, and every write can be previewed without consuming its
+key.
+
+Underneath, the invariants are SQLite triggers rather than application code — because a rule in a
+trigger outlives the code path that was meant to enforce it. Balance, immutability, chain continuity and
+period locks are all refused by the database itself.
+
+**466 tests. Zero runtime dependencies.** One book is one SQLite file: backup is `cp`, isolation is
+`chmod`. Runs on Node 22.13+, needs no server, no daemon, and no account.
 
 ```bash
 npx postledger --help
 ```
 
----
+### What it is not
+
+Not a general accounting package, and not trying to become one. No invoicing, no AR/AP workflow, no
+budgets, no payroll, no tax engine, no multi-user. There is **no hosted version and there will not be
+one** — this project is structurally incapable of holding your data, and therefore incapable of leaking
+it or walking away with it. That is not a promise about intentions; it is a property of where the file
+lives.
+
+Foreign amounts are converted at the rate that applied and recorded with the original alongside, which
+is all "multi-currency" means at the point of entry. What it deliberately does not do is exchange
+gain/loss or period-end revaluation — those are about rate *movement*, and belong in ordinary entries
+against an FX account rather than in the engine.
 
 ## 60 seconds, no signup
 
@@ -106,7 +123,7 @@ on every write, claimed atomically before any work happens, where replay returns
 | Source documents stay verifiable | Content-addressed; `verify` re-hashes the file on disk | `ledger.ts` |
 | Tampering is detectable | Hash chain over entries **and** their postings | `ledger.ts` |
 
-Each row has a test that goes red if you remove the mechanism. `npm test` runs 456 of them across eight
+Each row has a test that goes red if you remove the mechanism. `npm test` runs 466 of them across eight
 suites, including one that drives the real CLI and speaks real MCP over stdio.
 
 ### Why the database and not the application layer
@@ -499,7 +516,7 @@ docker run -v "$PWD/books:/books" ghcr.io/shuaige121/postledger \
 
 ```bash
 git clone https://github.com/shuaige121/postledger && cd postledger
-npm test                       # 456 assertions
+npm test                       # 466 assertions
 node src/cli.ts --help
 ```
 
@@ -552,7 +569,7 @@ postledger verify || echo "the books need attention"
 npm test
 ```
 
-456 assertions across eight suites: schema invariants, money arithmetic, the engine, forensics, reports
+466 assertions across eight suites: schema invariants, money arithmetic, the engine, forensics, reports
 and journal interop, and an end-to-end pass that drives the real CLI and speaks real MCP over stdio.
 
 ## License
